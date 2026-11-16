@@ -119,3 +119,7 @@ GitHub Actions runs `npm test` on every push and pull request, and each push to 
 - Sound: synth effects and music that speeds up with the game.
 - Touch tuning and a play-through on phones.
 - A home screen and settings.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
