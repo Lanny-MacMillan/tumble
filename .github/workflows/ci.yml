@@ -15,13 +15,21 @@ concurrency:
 
 jobs:
   test:
+    name: test (slice ${{ matrix.slice }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # the long fairness checks are split four ways; the four jobs together cover every case
       - run: npm test
+        env:
+          TEST_SLICE: ${{ matrix.slice }}/4
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

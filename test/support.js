@@ -105,6 +105,14 @@ function phaseTimes(chunks, count) {
   return out;
 }
 
+// TEST_SLICE=2/4 keeps every fourth case of the long checks, starting with the second, so CI can split them over
+// parallel jobs. Unset, every case runs.
+const SLICE = (() => {
+  const m = /^(\d+)\/(\d+)$/.exec(process.env.TEST_SLICE || '');
+  return m ? { k: +m[1] - 1, n: +m[2] } : { k: 0, n: 1 };
+})();
+function slicer() { let i = 0; return () => i++ % SLICE.n === SLICE.k; }
+
 const FULL_PHASES = process.env.TUMBLE_PHASES ? +process.env.TUMBLE_PHASES : 4;
 
 function chunkClearable(chunk, speed, phases) {
@@ -281,4 +289,4 @@ function hybridRun(world, speed, rng, jitterSteps, horizonTiles) {
   return { ok: guard < 4000, x: cube.x };
 }
 
-module.exports = { L, DT, FULL_PHASES, phaseTimes, cueBotClears, hybridRun, boostedCube, driveTo, buildWorld, idle, trial, plan, chunkClearable, pairClearable, botRun, MIN_STREAK, WAIT_STEP };
+module.exports = { L, DT, slicer, FULL_PHASES, phaseTimes, cueBotClears, hybridRun, boostedCube, driveTo, buildWorld, idle, trial, plan, chunkClearable, pairClearable, botRun, MIN_STREAK, WAIT_STEP };

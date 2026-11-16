@@ -244,8 +244,9 @@ test('the 3-hazard cap holds with the longer anti-gravity jump range, at every l
 });
 
 test('field chunks around their neighbours: every chunk can sit before or after a field chunk', () => {
-  const { driveTo, plan, pairClearable } = require('./support.js');
+  const { driveTo, plan, pairClearable, slicer } = require('./support.js');
   const failed = [];
+  const take = slicer();
   // pairs with a float gap (steady, cue driven) go planner -> cue bot or cue bot -> planner; the rest use one plan
   const mixed = (a, b, speed) => {
     const world = buildWorld([a, b]);
@@ -262,8 +263,8 @@ test('field chunks around their neighbours: every chunk can sit before or after 
     for (const o of L.CHUNKS) {
       if (o.steadyLevel !== null || (o.entryH !== 0 && o.entryH !== 3)) continue;
       const ok = (a, b) => (f.needsField ? mixed(a, b, speed) : pairClearable(a, b, speed));
-      if (o.exitH === f.entryH && !ok(o, f)) failed.push(`${o.name} -> ${f.name}`);
-      if (f.exitH === o.entryH && !ok(f, o)) failed.push(`${f.name} -> ${o.name}`);
+      if (o.exitH === f.entryH && take() && !ok(o, f)) failed.push(`${o.name} -> ${f.name}`);
+      if (f.exitH === o.entryH && take() && !ok(f, o)) failed.push(`${f.name} -> ${o.name}`);
     }
   }
   assert.deepEqual(failed, [], `not clearable: ${failed.slice(0, 12).join('; ')}`);

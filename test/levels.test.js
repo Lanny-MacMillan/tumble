@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { L, chunkClearable, cueBotClears } = require('./support.js');
+const { L, chunkClearable, cueBotClears, slicer } = require('./support.js');
 
 // every speed a player can be at: each level's speed, and several points on the way between levels
 function levelSpeeds() {
@@ -17,8 +17,9 @@ function levelSpeeds() {
 
 test('every chunk is clearable at every level speed and at points between levels', () => {
   const failed = [];
+  const take = slicer();
   for (const { label, speed } of levelSpeeds()) {
-    for (const c of L.CHUNKS.filter(q => q.steadyLevel === null)) if (!chunkClearable(c, speed)) failed.push(`${c.name} at ${label} (${Math.round(speed)} px/s)`);
+    for (const c of L.CHUNKS.filter(q => q.steadyLevel === null)) if (take() && !chunkClearable(c, speed)) failed.push(`${c.name} at ${label} (${Math.round(speed)} px/s)`);
   }
   assert.deepEqual(failed, [], `unclearable: ${failed.join('; ')}`);
 });
@@ -69,10 +70,11 @@ const LEAD_X = 8 * L.TILE;
 
 test('every chunk is clearable when a level boundary falls inside it, at several points along the chunk', () => {
   const failed = [];
+  const take = slicer();
   for (let k = 1; k <= L.LAST_LEVEL; k++) {
     for (const c of L.CHUNKS.filter(q => !q.needsOrb && q.steadyLevel === null)) {
       for (const at of [1, Math.floor(c.w / 2), c.w - 1]) {
-        if (!chunkClearable(c, speedAcrossBoundary(k, LEAD_X, at))) failed.push(`${c.name}: level ${k} starts ${at} tiles in`);
+        if (take() && !chunkClearable(c, speedAcrossBoundary(k, LEAD_X, at))) failed.push(`${c.name}: level ${k} starts ${at} tiles in`);
       }
     }
   }

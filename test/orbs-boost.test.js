@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { L, DT, buildWorld, chunkClearable, cueBotClears, boostedCube, hybridRun, driveTo } = require('./support.js');
+const { L, DT, buildWorld, chunkClearable, cueBotClears, boostedCube, hybridRun, driveTo, slicer } = require('./support.js');
 
 const chunk = name => L.CHUNKS.find(c => c.name === name);
 const orbChunks = h => L.CHUNKS.filter(c => c.needsOrb && c.entryH === h);
@@ -71,12 +71,13 @@ function orbPair(a, b, speed) {
 
 test('every chunk that can sit before or after an orb gap is clearable around it, at the orb gap level speed', () => {
   const failed = [];
+  const take = slicer();
   for (const o of L.CHUNKS.filter(c => c.needsOrb && (c.entryH === 0 || c.entryH === 3))) {
     const speed = L.levelSpeed(o.steadyLevel);
     for (const c of L.CHUNKS) {
       if (c.needsOrb || c.steadyLevel !== null) continue;
-      if (c.exitH === o.entryH && !orbPair(c, o, speed)) failed.push(`${c.name} -> ${o.name}`);
-      if (o.exitH === c.entryH && !orbPair(o, c, speed)) failed.push(`${o.name} -> ${c.name}`);
+      if (c.exitH === o.entryH && take() && !orbPair(c, o, speed)) failed.push(`${c.name} -> ${o.name}`);
+      if (o.exitH === c.entryH && take() && !orbPair(o, c, speed)) failed.push(`${o.name} -> ${c.name}`);
     }
   }
   assert.deepEqual(failed, [], `not clearable: ${failed.slice(0, 15).join('; ')}`);
