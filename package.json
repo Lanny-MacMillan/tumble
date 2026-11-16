@@ -1,0 +1,9 @@
+{
+  "name": "tumble",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:full": "node --test test/*.test.js test/full/*.test.js",
+    "test:chains": "node test/closure/run.js"
+  }
+}

@@ -1,0 +1,1347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Tumble</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060f; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="src/logic.js"></script>
+<script>
+(() => {
+  const L = window.TumbleLogic;
+  const store = L.createStore(() => window.localStorage);
+  // ?cubelevel=5 previews everything unlocked up to that cube level; nothing is saved, and runs do not count
+  const previewLevel = (() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('cubelevel');
+      return q !== null && !isNaN(+q) ? Math.max(1, Math.min(L.CUBE_LEVELS.length, Math.round(+q))) : 0;
+    } catch (e) { return 0; }
+  })();
+  let cubeLevel = previewLevel || store.getLevel();   // the core square comes at cube level 3, the aura at 5
+  let look = previewLevel ? L.sanitizeLook(null, previewLevel) : store.getLook();
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  // measuring only (D, then G): with glow off every shadowBlur the drawing code sets is taken as 0
+  let glow = true;
+  const blurProp = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'shadowBlur');
+  Object.defineProperty(ctx, 'shadowBlur', {
+    get() { return blurProp.get.call(ctx); },
+    set(v) { blurProp.set.call(ctx, glow ? v : 0); },
+  });
+  // measuring only (D, then R): draw at half the screen's pixel ratio
+  let lowRes = false;
+
+  const VIEW_H = L.VIEW_H;
+  const CUBE_SCREEN_X = L.CUBE_SCREEN_X;
+  const STEP = 1 / 120;
+  const TRAIL_LEN = 26, TRAIL_W = 10, TRAIL_ALPHA = 0.7;   // boost ribbon: points kept, width at the cube, alpha at the cube
+  // cube colours, unlocked by cube level (L.CUBE_LEVELS); prism turns slowly through the hues
+  const CUBE_COLORS = { magenta: '#ff2bd6', cyan: '#00e5ff', solar: '#ffb000', toxic: '#8aff2e', ember: '#ff5e1a', ghost: '#dfe8ff', gold: '#ffd700', prism: null };
+  const PRISM_S = 8;                   // seconds for prism to go once round the hues
+  let CUBE_COL = CUBE_COLORS.magenta;  // the cube, its sparks and its shatter, this frame
+  let prismT = 0;
+  const SHAKE_PX = 22;                 // shake strength per second of shake: a 0.5 s shake starts at 11 px
+  const MAX_PARTICLES = 400, DUST_N = 5;
+
+  const touchDevice = window.matchMedia('(pointer: coarse)').matches;
+  let scale = 1, viewW = 960, portrait = false;
+
+  function resize() {
+    const dpr = (window.devicePixelRatio || 1) * (lowRes ? 0.5 : 1);
+    const w = window.innerWidth, h = window.innerHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    // keep at least MIN_VIEW_W of the track in view so cues have time to be seen
+    scale = Math.min((h * dpr) / VIEW_H, (w * dpr) / L.MIN_VIEW_W);
+    viewW = (w * dpr) / scale;
+    portrait = touchDevice && h > w;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ?practice=tunnel1,moveStone,crumbleRun serves just those pieces, over and over (heights default to @0)
+  const practice = (() => {
+    try {
+      const list = (new URLSearchParams(window.location.search).get('practice') || '').split(',').map(n => n.trim()).filter(Boolean);
+      // a bare name means its @0 form, or the first family member that is built for level 0 (floatGap -> floatGap0)
+      const found = list.map(n => L.CHUNKS.find(c => c.name === (n.includes('@') ? n : n + '@0')) || L.CHUNKS.find(c => c.name === n + '0@0') || L.CHUNKS.find(c => c.name.startsWith(n + '@'))).filter(Boolean);
+      return found.length ? found : null;
+    } catch (e) { return null; }
+  })();
+  let bestCache = store.getBest();
+  let lastRun = null;
+  let bestFlash = 0;
+  let warpFlash = 0;     // seconds left of the quiet flash after a warp
+  // deaths per piece this session, shown only with D; nothing is stored or sent anywhere
+  const deaths = {};
+  let deathTotal = 0;
+  // ?bench: a hands-free frame-time test. The cube flies over the track as a ghost that cannot die, boosted, with a
+  // level-up burst every BENCH_BURST_S, through three timed rounds (as is, glow off, half resolution); then a table
+  const bench = (() => {
+    try { return new URLSearchParams(window.location.search).has('bench'); } catch (e) { return false; }
+  })();
+  const BENCH_ROUND_S = 12, BENCH_SKIP_S = 1.5, BENCH_BURST_S = 2.5, BENCH_HOVER_TILES = 4;
+  const benchRounds = [{ name: 'as is', glow: true, lowRes: false }, { name: 'glow off', glow: false, lowRes: false }, { name: 'half res', glow: true, lowRes: true }]
+    .map(r => Object.assign(r, { n: 0, gap: 0, gapMax: 0, over17: 0, over25: 0, workMax: 0 }));
+  let benchRound = -1, benchT = 0, benchBurst = 0;
+  const practiceLevel = (() => {
+    try {
+      // counted from 1, as the HUD shows it: ?level=1 is the first level, ?level=7 the last
+      const q = new URLSearchParams(window.location.search).get('level');
+      if (q !== null && !isNaN(+q)) return Math.max(0, Math.min(L.LAST_LEVEL, Math.round(+q) - 1));
+    } catch (e) {}
+    if (bench) return L.LAST_LEVEL;
+    return practice ? L.practiceStart(practice) : 0;
+  })();
+  // ?showcase=orbGap plays one mechanic from its level 0 form up through level 6 (names in L.SHOWCASES)
+  const showcase = (() => {
+    try {
+      const n = new URLSearchParams(window.location.search).get('showcase');
+      return n && L.showcaseSequence(n) ? n : null;
+    } catch (e) { return null; }
+  })();
+  // practice, a chosen start level and showcases never save a best or count deaths
+  const trialRun = !!(practice || showcase || practiceLevel > 0 || bench || previewLevel);
+  function startGame(running) {
+    return showcase ? L.newShowcase(newSeed(), showcase, running, 0) : L.newGame(newSeed(), running, bestCache, practice, practiceLevel);
+  }
+  let game = startGame(false);
+  let held = false;
+  let pressQueued = false;
+  let debug = false;
+  let paused = false;
+
+  let squash = 0, squashV = 0;
+  let shakeT = 0, shakeDur = 1, shakeClock = 0;
+  let particles = [];
+  let trail = [];
+
+  // a bigger shake replaces a smaller one; it eases out and is off under reduced motion
+  function shake(s) {
+    if (calm || s < shakeT) return;
+    shakeT = s; shakeDur = s;
+  }
+
+  // a few specks of ground kicked up where the cube lands
+  function landDust() {
+    const c = game.cube;
+    for (let i = 0; i < DUST_N; i++) {
+      particles.push({ x: c.x + Math.random() * L.CUBE, y: c.y + L.CUBE - 2, vx: (Math.random() - 0.5) * 120, vy: -20 - Math.random() * 50,
+        size: 2 + Math.random() * 2, rot: 0, vr: 0, life: 0.25, age: 0, col: col('ground'), g: 300, fill: true });
+    }
+  }
+
+  function sparks(x, y, n, color) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 160;
+      particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, size: 2 + Math.random() * 3, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 10, life: 0.35 + Math.random() * 0.25, age: 0, col: color, g: 200 });
+    }
+  }
+
+  // one zone per run level: a palette and a backdrop motif (see MOTIFS), both fading over on a level up.
+  // Spike and plat stay at 3:1 or better against bg in every zone.
+  const calm = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const PALETTES = [
+    { bg: [5, 6, 15], grid: [80, 120, 255], ground: [0, 240, 255], spike: [255, 51, 85], plat: [255, 238, 51], accent: [0, 240, 255] },        // 0 neon grid
+    { bg: [4, 16, 10], grid: [60, 255, 140], ground: [57, 255, 136], spike: [255, 77, 157], plat: [232, 255, 58], accent: [57, 255, 136] },     // 1 toxic
+    { bg: [18, 6, 4], grid: [255, 120, 40], ground: [255, 138, 43], spike: [255, 45, 85], plat: [255, 210, 58], accent: [255, 138, 43] },        // 2 ember
+    { bg: [10, 6, 21], grid: [170, 110, 255], ground: [181, 131, 255], spike: [255, 95, 162], plat: [95, 242, 255], accent: [181, 131, 255] },  // 3 ultraviolet
+    { bg: [0, 13, 18], grid: [0, 180, 170], ground: [0, 255, 200], spike: [255, 70, 130], plat: [255, 180, 60], accent: [0, 255, 200] },        // 4 abyss
+    { bg: [20, 4, 18], grid: [255, 80, 180], ground: [255, 80, 200], spike: [255, 70, 40], plat: [90, 240, 255], accent: [255, 190, 60] },      // 5 sunset
+    { bg: [3, 3, 6], grid: [200, 200, 255], ground: [235, 240, 255], spike: [255, 50, 120], plat: [255, 230, 60], accent: [120, 255, 240] },    // 6 prism
+  ];
+  const PAL_FADE_S = 0.6;
+  const LEVEL_FX_S = 1.6;
+  const zoneOf = level => level % PALETTES.length;
+  let palFrom = PALETTES[zoneOf(game.level)], palTo = palFrom, palT = 1;
+  let zoneFrom = zoneOf(game.level), zoneTo = zoneFrom;
+  let levelFx = 0;       // seconds into the level-up moment, 0 when idle
+  let rings = [];
+
+  function mixC(name) {
+    const a = palFrom[name], b = palTo[name];
+    return [a[0] + (b[0] - a[0]) * palT, a[1] + (b[1] - a[1]) * palT, a[2] + (b[2] - a[2]) * palT];
+  }
+  function col(name) { const c = mixC(name); return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`; }
+  function colA(name, a) { const c = mixC(name); return `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`; }
+  function snapshotPalette() {
+    const out = {};
+    for (const k of Object.keys(PALETTES[0])) out[k] = mixC(k);
+    return out;
+  }
+
+  // The one loud moment. It lasts LEVEL_FX_S and then everything is calm again.
+  // Safety: a single flash (alpha capped at 0.4, over 0.25 s), nothing that strobes.
+  // The picture is upside down between flip portals (not for reduced motion). HUD and titles stay upright; the
+  // level-up burst is drawn upright too, so it always rises on screen.
+  function isFlipped() { return !calm && L.flipAt(game.world, game.cube.x + L.CUBE / 2); }
+  function screenY(y) { return isFlipped() ? VIEW_H - y : y; }
+
+  const WARP_FLASH_S = 0.18;   // one flash, alpha capped at 0.3, nothing that repeats
+
+  function startLevelFx() {
+    palFrom = snapshotPalette();
+    palTo = PALETTES[zoneOf(game.level)];
+    palT = 0;
+    zoneFrom = zoneTo; zoneTo = zoneOf(game.level);
+    levelFx = 0.0001;
+    if (calm) return;
+    shake(0.5);
+    rings = [{ age: 0 }, { age: -0.12 }, { age: -0.24 }];
+    const cx = game.cube.x + L.CUBE / 2, cy = screenY(game.cube.y + L.CUBE / 2);
+    const cols = [col('accent'), col('ground'), col('plat'), '#ffffff'];
+    for (let i = 0; i < 70; i++) {
+      const a = -Math.random() * Math.PI;   // upper half only, so nothing falls across the track
+      const sp = 140 + Math.random() * 420;
+      particles.push({
+        x: cx, y: cy, vx: Math.cos(a) * sp + 160, vy: Math.sin(a) * sp - 40,
+        size: 3 + Math.random() * 7, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 14,
+        life: 0.8 + Math.random() * 0.5, age: 0, col: cols[i % cols.length], g: 120, back: true,
+      });
+    }
+    try { if (navigator.vibrate) navigator.vibrate([40, 50, 40, 50, 90]); } catch (e) {}
+  }
+
+  function newSeed() { return (Math.random() * 0xffffffff) >>> 0; }
+
+  function lockLandscape() {
+    try {
+      if (touchDevice && screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('landscape').catch(() => {});
+      }
+    } catch (e) {}
+  }
+
+  function press() { held = true; pressQueued = true; lockLandscape(); }
+  function release() { held = false; }
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault();
+      if (!e.repeat) press();
+    } else if (e.code === 'KeyD') {
+      debug = !debug;
+    } else if (e.code === 'KeyL' && debug) {
+      startLevelFx();   // a level-up burst on demand, to measure the worst frame
+    } else if (e.code === 'KeyG' && debug) {
+      glow = !glow;
+    } else if (e.code === 'KeyR' && debug) {
+      lowRes = !lowRes;
+      resize();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') release();
+  });
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    // on the retry screen a tap on a colour or a wearable equips it; anywhere else restarts as before
+    if (pickerShown()) {
+      const r = canvas.getBoundingClientRect();
+      const vx = ((e.clientX - r.left) * canvas.width) / r.width / scale, vy = ((e.clientY - r.top) * canvas.height) / r.height / scale;
+      const hit = pickerItems().find(q => Math.abs(vx - q.x) <= PICK_HIT && Math.abs(vy - q.y) <= PICK_HIT);
+      if (hit) { if (!hit.locked) equip(hit); return; }
+    }
+    press();
+  });
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
+
+  // pause when the tab is hidden and drop any stored time on resume
+  document.addEventListener('visibilitychange', () => {
+    paused = document.hidden;
+    if (!paused) { last = performance.now(); acc = 0; }
+  });
+
+  function restart() {
+    game = startGame(true);
+    trail = [];
+    lastRun = null;
+    bestFlash = 0;
+    warpFlash = 0;
+    palFrom = palTo = PALETTES[zoneOf(game.level)]; palT = 1; levelFx = 0; rings = [];
+    zoneFrom = zoneTo = zoneOf(game.level);
+    particles = [];
+    squash = squashV = 0;
+  }
+
+  // '#rrggbb' for a hue (full saturation, lightened so deep blue stays readable on every zone), so the cube's 18% fill
+  // can still add an alpha byte
+  function hueHex(h) {
+    const f = n => { const k = (n + h / 30) % 12; const v = 0.64 - 0.36 * Math.max(-1, Math.min(k - 3, 9 - k, 1)); return Math.round(v * 255).toString(16).padStart(2, '0'); };
+    return '#' + f(0) + f(8) + f(4);
+  }
+  function cubeColNow() {
+    return look.color === 'prism' ? hueHex((prismT / PRISM_S) * 360 % 360) : (CUBE_COLORS[look.color] || CUBE_COLORS.magenta);
+  }
+
+  function spawnShatter() {
+    const c = game.cube;
+    const cx = c.x + L.CUBE / 2, cy = c.y + L.CUBE / 2;
+    for (let i = 0; i < 18; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 80 + Math.random() * 260;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * sp + 120, vy: Math.sin(a) * sp - 120,
+        size: 3 + Math.random() * 6,
+        rot: Math.random() * 6, vr: (Math.random() - 0.5) * 12,
+        life: 0.9 + Math.random() * 0.5, age: 0,
+      });
+    }
+  }
+
+  function update(dt) {
+    const input = { pressed: pressQueued, held };
+    if (game.state === 'dead') {
+      if (pressQueued && L.canRestart(game)) {
+        restart();
+        pressQueued = false;
+        return;
+      }
+    }
+    pressQueued = false;
+
+    const events = bench ? benchStep(dt) : L.stepGame(game, input, dt);
+    for (const e of events) {
+      if (e === 'jump') { squash = -0.25; squashV = 0; }
+      if (e === 'land') { squash = 0.3; squashV = 0; if (!calm) landDust(); }
+      if (e === 'die') {
+        spawnShatter(); shake(0.35); trail = [];
+        if (!trialRun) {
+          const at = game.world.placed.find(q => game.cube.x >= q.x0 && game.cube.x < q.x1);
+          const key = (at ? at.chunk.name.split('@')[0] : 'start') + ' / ' + game.deadReason;
+          deaths[key] = (deaths[key] || 0) + 1;
+          deathTotal++;
+        }
+        lastRun = trialRun ? { best: bestCache, isNewBest: false } : store.recordRun(L.meters(game));
+        bestCache = lastRun.best;
+        if (!trialRun) { cubeLevel = lastRun.level; look = store.getLook(); }
+      }
+      if (e === 'best') bestFlash = 1.5;
+      if (e === 'level') startLevelFx();
+      if (e === 'flip' && !calm) warpFlash = WARP_FLASH_S;
+      if (e === 'warp') {
+        // the picture jumps a few tiles while the cube stays put on screen: one short soft flash hides the seam
+        trail = [];
+        if (!calm) warpFlash = WARP_FLASH_S;
+        sparks(game.cube.x + L.CUBE / 2, game.cube.y + L.CUBE / 2, 16, col('accent'));
+      }
+      if (e === 'pickup') { sparks(game.cube.x + L.CUBE / 2, game.cube.y + L.CUBE / 2, 12, '#7dffb0'); }
+      if (e === 'shield' && !calm) { warpFlash = WARP_FLASH_S; sparks(game.cube.x + L.CUBE / 2, game.cube.y + L.CUBE / 2, 18, '#7dffb0'); }
+      if (e === 'bounce') { squash = -0.35; squashV = 0; shake(0.12); sparks(game.cube.x + L.CUBE / 2, game.cube.y + L.CUBE, 14, col('plat')); }
+      if (e === 'orb') { squash = -0.25; squashV = 0; sparks(game.cube.x + L.CUBE / 2, game.cube.y + L.CUBE / 2, 12, col('plat')); }
+    }
+
+    // every cube leaves sparks behind it while it runs
+    const tscale = L.timeScale(game.world, game.cube);
+    if (game.state === 'running' && Math.random() < 0.9 * tscale) {
+      particles.push({ x: game.cube.x, y: game.cube.y + L.CUBE * (0.15 + Math.random() * 0.7), vx: -70 - Math.random() * 100, vy: (Math.random() - 0.5) * 70,
+        size: 2 + Math.random() * 2, rot: 0, vr: 0, life: 0.5, age: 0, col: CUBE_COL, g: 0, fill: true });
+    }
+    // while boosted: a ribbon behind the cube and a thin stream of sparks, nothing else
+    const bm = L.boostMul(game.cube);
+    if (bm > 1.02 && game.state === 'running') {
+      trail.push({ x: game.cube.x + L.CUBE / 2, y: game.cube.y + L.CUBE / 2 });
+      if (trail.length > TRAIL_LEN) trail.shift();
+      if (!calm && Math.random() < 0.35) particles.push({ x: game.cube.x, y: game.cube.y + Math.random() * L.CUBE, vx: -260 - Math.random() * 200, vy: (Math.random() - 0.5) * 80, size: 2 + Math.random() * 2, rot: 0, vr: 0, life: 0.3, age: 0, col: col('accent'), g: 0 });
+    } else if (trail.length) trail.shift();
+    squashV += (-squash * 400 - squashV * 18) * dt;
+    squash += squashV * dt;
+    shakeT = Math.max(0, shakeT - dt);
+    shakeClock += dt;
+    prismT += dt;
+    CUBE_COL = cubeColNow();
+    bestFlash = Math.max(0, bestFlash - dt);
+    warpFlash = Math.max(0, warpFlash - dt);
+    if (palT < 1) palT = Math.min(1, palT + dt / PAL_FADE_S);
+    if (levelFx > 0) { levelFx += dt; if (levelFx > LEVEL_FX_S) levelFx = 0; }
+    for (const r of rings) r.age += dt;
+    rings = rings.filter(r => r.age < 1);
+
+    for (const p of particles) {
+      p.age += dt;
+      p.vy += (p.g === undefined ? 900 : p.g) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.rot += p.vr * dt;
+    }
+    particles = particles.filter(p => p.age < p.life);
+    if (particles.length > MAX_PARTICLES) particles = particles.slice(-MAX_PARTICLES);
+  }
+
+  // ---- drawing ----
+
+  // ---- background motion: three layers and a grid that speeds up with you ----
+  // Everything here is drawn from the camera x and the current speed alone: no stored state, nothing
+  // allocated inside the loops, no shadows, and nothing brighter than 0.25 so hazards stay readable.
+  const PAR_FAR = 0.12, PAR_MID = 0.30, PAR_NEAR = 0.55;
+  const GRID_ALPHA_MIN = 0.10, GRID_ALPHA_MAX = 0.22, BEAT_TILES = 8;
+  const FAR_STEP = 96, FAR_BASE = 360;
+  const FAR_H = [0, 34, 70, 44, 96, 58, 30, 80, 112, 64];          // one ridge period is FAR_H.length steps
+  const MID_PERIOD = 1280;
+  const MID_X = [40, 190, 330, 520, 640, 790, 930, 1080, 1200];
+  const MID_Y = [150, 250, 120, 210, 90, 270, 170, 110, 230];
+  const MID_S = [22, 16, 26, 18, 30, 14, 24, 20, 17];
+  const MID_K = [0, 1, 0, 1, 1, 0, 1, 0, 1];                         // 0 triangle, 1 diamond
+
+  // far ridge: the neon-grid skyline, also behind the sunset sun
+  function drawRidge(camX) {
+    ctx.strokeStyle = colA('grid', 0.1);
+    ctx.lineWidth = 1.5;
+    const farPeriod = FAR_STEP * FAR_H.length;
+    const farOff = (camX * PAR_FAR) % farPeriod;
+    ctx.beginPath();
+    let i0 = 0;
+    for (let x = -farOff - farPeriod; x < viewW + FAR_STEP; x += FAR_STEP, i0++) {
+      const y = FAR_BASE - FAR_H[((i0 % FAR_H.length) + FAR_H.length) % FAR_H.length];
+      if (x <= -farOff - farPeriod) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // calls fn(x, y, size, kind) for each mid-layer slot on screen
+  function eachMid(camX, par, fn) {
+    const midOff = (camX * par) % MID_PERIOD;
+    for (let rep = 0; rep < 2; rep++) {
+      for (let i = 0; i < MID_X.length; i++) {
+        const x = MID_X[i] + rep * MID_PERIOD - midOff;
+        if (x < -60 || x > viewW + 60) continue;
+        fn(x, MID_Y[i], MID_S[i], MID_K[i]);
+      }
+    }
+  }
+
+  const ABYSS_PAR = [0.08, 0.2, 0.4];
+  // One backdrop motif per zone, all held to the rules above. Each draws its far and mid layers.
+  const MOTIFS = [
+    // 0 neon grid: skyline and wireframe triangles and diamonds
+    camX => {
+      drawRidge(camX);
+      ctx.strokeStyle = colA('grid', 0.12); ctx.lineWidth = 1;
+      ctx.beginPath();
+      eachMid(camX, PAR_MID, (x, y, sz, k) => {
+        if (k === 0) { ctx.moveTo(x - sz, y + sz); ctx.lineTo(x, y - sz); ctx.lineTo(x + sz, y + sz); ctx.lineTo(x - sz, y + sz); }
+        else { ctx.moveTo(x, y - sz); ctx.lineTo(x + sz, y); ctx.lineTo(x, y + sz); ctx.lineTo(x - sz, y); ctx.lineTo(x, y - sz); }
+      });
+      ctx.stroke();
+    },
+    // 1 toxic: a scattered honeycomb
+    camX => {
+      const r = 24, w = r * 1.732, p = camX * PAR_MID;
+      ctx.strokeStyle = colA('grid', 0.12); ctx.lineWidth = 1;
+      ctx.beginPath();
+      const i0 = Math.floor(p / w) - 1;
+      for (let i = i0; i < i0 + viewW / w + 3; i++) {
+        for (let j = 0; j < 6; j++) {
+          if (((i * 73 + j * 151) % 7 + 7) % 7 >= 3) continue;
+          const x = i * w - p + (j % 2 ? w / 2 : 0), y = 70 + j * r * 1.5;
+          ctx.moveTo(x, y - r);
+          for (let s = 1; s <= 6; s++) ctx.lineTo(x + Math.sin(s * Math.PI / 3) * r, y - Math.cos(s * Math.PI / 3) * r);
+        }
+      }
+      ctx.stroke();
+    },
+    // 2 ember: equalizer bars on the horizon and small floating embers
+    camX => {
+      const bw = 18, gap = 30, p = camX * PAR_FAR;
+      ctx.strokeStyle = colA('grid', 0.1); ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const i0 = Math.floor(p / gap) - 1;
+      for (let i = i0; i < i0 + viewW / gap + 3; i++) {
+        const h = 20 + ((i * 37 % 11) + 11) % 11 * 12;
+        ctx.rect(i * gap - p, FAR_BASE - h, bw, h);
+      }
+      ctx.stroke();
+      ctx.fillStyle = colA('accent', 0.14);
+      eachMid(camX, PAR_MID, (x, y, sz) => ctx.fillRect(x, y, sz / 4, sz / 4));
+    },
+    // 3 ultraviolet: a slow planet on the horizon and ringed orbs
+    camX => {
+      const period = viewW + 800;
+      const px = viewW + 300 - (camX * 0.05) % period;
+      ctx.strokeStyle = colA('grid', 0.1); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, FAR_BASE + 40, 140, Math.PI, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(px, FAR_BASE - 10, 210, 26, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
+      ctx.strokeStyle = colA('grid', 0.12); ctx.lineWidth = 1;
+      ctx.beginPath();
+      eachMid(camX, PAR_MID, (x, y, sz) => { ctx.moveTo(x + sz * 0.6, y); ctx.arc(x, y, sz * 0.6, 0, Math.PI * 2); ctx.moveTo(x + sz * 1.2, y); ctx.arc(x, y, sz * 1.2, 0, Math.PI * 2); });
+      ctx.stroke();
+    },
+    // 4 abyss: a wavy sea floor and bubbles at three depths
+    camX => {
+      ctx.strokeStyle = colA('grid', 0.1); ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const p = camX * PAR_FAR;
+      for (let x = 0; x <= viewW + 24; x += 24) {
+        const y = FAR_BASE - 20 + 16 * Math.sin((x + p) / 90) + 8 * Math.sin((x + p) / 37);
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      for (let d = 0; d < 3; d++) {
+        const par = ABYSS_PAR[d], size = 2 + d;
+        ctx.fillStyle = colA('accent', 0.12 + d * 0.05);
+        eachMid(camX + d * 4000, par, (x, y, sz) => ctx.fillRect(x + sz * d, y - d * 30, size, size));
+      }
+    },
+    // 5 sunset: a striped sun sitting on the skyline
+    camX => {
+      const cx = viewW * 0.68, cy = FAR_BASE - 20, r = 110;
+      ctx.strokeStyle = colA('accent', 0.14); ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let y = cy - r + 4, k = 0; y < cy; y += 6 + k, k++) {
+        if (k % 3 === 2 && y > cy - r * 0.6) continue;   // gaps that widen toward the horizon
+        const half = Math.sqrt(r * r - (cy - y) * (cy - y));
+        ctx.moveTo(cx - half, y); ctx.lineTo(cx + half, y);
+      }
+      ctx.stroke();
+      drawRidge(camX);
+    },
+    // 6 prism: slanted light rays and glass shards
+    camX => {
+      const gap = 220, p = camX * PAR_FAR;
+      ctx.strokeStyle = colA('accent', 0.06); ctx.lineWidth = 3;
+      ctx.beginPath();
+      const i0 = Math.floor(p / gap) - 1;
+      for (let i = i0; i < i0 + (viewW + 160) / gap + 3; i++) {
+        const x = i * gap - p;
+        ctx.moveTo(x, 0); ctx.lineTo(x - 120, FAR_BASE);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = colA('grid', 0.13); ctx.lineWidth = 1;
+      ctx.beginPath();
+      eachMid(camX, PAR_MID, (x, y, sz) => { ctx.moveTo(x, y - sz * 1.6); ctx.lineTo(x + sz * 0.5, y + sz); ctx.lineTo(x - sz * 0.4, y + sz * 0.6); ctx.closePath(); });
+      ctx.stroke();
+    },
+  ];
+
+  function drawBackdrop(camX) {
+    const speed = L.gameSpeed(game) * L.boostMul(game.cube);
+    const f = Math.min(1, Math.max(0, (speed - L.SPEED_MIN) / (L.SPEED_MAX - L.SPEED_MIN)));
+    const gridA = GRID_ALPHA_MIN + (GRID_ALPHA_MAX - GRID_ALPHA_MIN) * f;
+    const beatA = Math.min(0.25, gridA + 0.05 + (L.boostMul(game.cube) > 1.02 ? 0.04 : 0));
+
+    // the zone motif, cross-fading with the palette on a level up
+    if (palT < 1 && zoneFrom !== zoneTo) {
+      ctx.globalAlpha = 1 - palT; MOTIFS[zoneFrom](camX);
+      ctx.globalAlpha = palT; MOTIFS[zoneTo](camX);
+      ctx.globalAlpha = 1;
+    } else MOTIFS[zoneTo](camX);
+
+    // near grid, brighter the faster you go
+    ctx.strokeStyle = colA('grid', gridA);
+    ctx.lineWidth = 1;
+    const gap = 40;
+    const off = (camX * PAR_NEAR) % gap;
+    ctx.beginPath();
+    for (let x = -off; x < viewW; x += gap) { ctx.moveTo(x, 0); ctx.lineTo(x, VIEW_H); }
+    for (let y = 0; y < VIEW_H; y += gap) { ctx.moveTo(0, y); ctx.lineTo(viewW, y); }
+    ctx.stroke();
+
+    // a thin vertical beat line every BEAT_TILES tiles of distance
+    const beat = BEAT_TILES * L.TILE;
+    const beatOff = (camX * PAR_NEAR) % beat;
+    ctx.strokeStyle = colA('grid', beatA);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let x = -beatOff; x < viewW; x += beat) { ctx.moveTo(x, 0); ctx.lineTo(x, VIEW_H); }
+    ctx.stroke();
+  }
+
+  function drawWorld(camX) {
+    const w = game.world;
+    ctx.save();
+    ctx.translate(-camX, 0);
+    const left = camX - 40, right = camX + viewW + 40;
+
+    // slow-time and anti-gravity fields: a tinted column with dashed edges, seen from far ahead
+    for (const f of w.fields) {
+      if (f.x1 < left || f.x0 > right) continue;
+      const tint = f.kind === 'slow' ? '110,168,255' : '125,255,176';
+      const ramp = L.FIELD_RAMP_TILES * L.TILE;
+      const g = ctx.createLinearGradient(f.x0, 0, f.x1, 0);
+      const r = Math.min(0.5, ramp / (f.x1 - f.x0));
+      g.addColorStop(0, `rgba(${tint},0)`); g.addColorStop(r, `rgba(${tint},0.14)`);
+      g.addColorStop(1 - r, `rgba(${tint},0.14)`); g.addColorStop(1, `rgba(${tint},0)`);
+      ctx.fillStyle = g; ctx.fillRect(f.x0, 0, f.x1 - f.x0, L.FLOOR_Y);
+      ctx.strokeStyle = `rgba(${tint},0.55)`; ctx.lineWidth = 1.5; ctx.setLineDash([6, 10]);
+      ctx.beginPath(); ctx.moveTo(f.x0, 0); ctx.lineTo(f.x0, L.FLOOR_Y); ctx.moveTo(f.x1, 0); ctx.lineTo(f.x1, L.FLOOR_Y); ctx.stroke();
+      ctx.setLineDash([]);
+      const tt = game.cube.t, width = f.x1 - f.x0;
+      if (f.kind === 'slow') {
+        // a clock dial
+        const cx = (f.x0 + f.x1) / 2, cy = 110;
+        ctx.strokeStyle = `rgba(${tint},0.45)`; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cx, cy, 34, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(tt * 1.6) * 28, cy + Math.sin(tt * 1.6) * 28); ctx.stroke();
+      } else {
+        // specks drifting up
+        ctx.fillStyle = `rgba(${tint},0.5)`;
+        for (let i = 0; i < 14; i++) {
+          const x = f.x0 + ((i * 97) % Math.max(1, width));
+          const y = L.FLOOR_Y - ((tt * 50 + i * 53) % 340);
+          ctx.fillRect(Math.round(x / 3) * 3, Math.round(y / 3) * 3, 3, 3);
+        }
+      }
+    }
+
+    ctx.shadowColor = col('ground');
+    ctx.shadowBlur = 14;
+    ctx.strokeStyle = col('ground');
+    ctx.fillStyle = colA('ground', 0.06);
+    ctx.lineWidth = 3;
+    for (const s of w.solids) {
+      if (s.x1 < left || s.x0 > right) continue;
+      const x0 = Math.max(s.x0, left - 100);
+      ctx.fillRect(x0, s.top, s.x1 - x0, VIEW_H - s.top + 60);
+      ctx.beginPath();
+      ctx.moveTo(x0, s.top);
+      ctx.lineTo(s.x1, s.top);
+      ctx.stroke();
+      if (s.x0 > left - 100) {
+        ctx.beginPath();
+        ctx.moveTo(s.x0, s.top);
+        ctx.lineTo(s.x0, VIEW_H + 60);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.moveTo(s.x1, s.top);
+      ctx.lineTo(s.x1, VIEW_H + 60);
+      ctx.stroke();
+    }
+
+    // vanishing floor: drawn as ground until the cube is 17 tiles from it, then it shakes and falls away. The gap is
+    // always real; this is only the picture. No flashing, and under reduced motion it just goes.
+    for (const q of w.vanish) {
+      if (q.x1 < left || q.x0 > right) continue;
+      const cx = game.cube.x + L.CUBE / 2;
+      if (cx < q.trigger) { q.seenAt = undefined; }
+      else if (q.seenAt === undefined) q.seenAt = game.cube.t;
+      const age = q.seenAt === undefined ? -1 : game.cube.t - q.seenAt;
+      if (calm && age >= 0) continue;
+      let dy = 0, dx = 0, a = 1;
+      if (age >= 0.25) { const f = age - 0.25; dy = 0.5 * 1500 * f * f; a = Math.max(0, 1 - f * 2.2); }
+      else if (age >= 0) dx = Math.sin(age * 90) * 2;
+      if (a <= 0) continue;
+      ctx.globalAlpha = a;
+      ctx.shadowColor = col('ground'); ctx.shadowBlur = 14;
+      ctx.strokeStyle = col('ground'); ctx.fillStyle = colA('ground', 0.06); ctx.lineWidth = 3;
+      ctx.fillRect(q.x0 + dx, q.top + dy, q.x1 - q.x0, VIEW_H - q.top + 60);
+      ctx.beginPath(); ctx.moveTo(q.x0 + dx, q.top + dy); ctx.lineTo(q.x1 + dx, q.top + dy); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // slam roof: a hatched slab hangs high until the cube is 17 tiles away, then drops to the crush line (drawn dashed all
+    // along). No flashing; under reduced motion it jumps to the crush line at the trigger.
+    for (const q of w.slams) {
+      if (q.x1 < left || q.x0 > right) continue;
+      const cx = game.cube.x + L.CUBE / 2;
+      if (cx < q.trigger) { q.seenAt = undefined; }
+      else if (q.seenAt === undefined) q.seenAt = game.cube.t;
+      const f = q.seenAt === undefined ? 0 : calm ? 1 : Math.min(1, (game.cube.t - q.seenAt) / 0.3);
+      const off = 300 * (1 - f * f);
+      const thick = 18, wd = q.x1 - q.x0;
+      ctx.save();
+      ctx.shadowBlur = 0; ctx.strokeStyle = colA('spike', 0.6); ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(q.x0, q.bottom); ctx.lineTo(q.x1, q.bottom); ctx.stroke();
+      ctx.restore();
+      ctx.shadowColor = col('spike'); ctx.shadowBlur = 14;
+      ctx.fillStyle = colA('spike', 0.2); ctx.fillRect(q.x0, q.bottom - thick - off, wd, thick);
+      ctx.strokeStyle = col('spike'); ctx.lineWidth = 3; ctx.strokeRect(q.x0, q.bottom - thick - off, wd, thick);
+      ctx.lineWidth = 2; ctx.beginPath();
+      for (let x = q.x0; x < q.x1; x += 18) { ctx.moveTo(x, q.bottom - off); ctx.lineTo(Math.min(x + 12, q.x1), q.bottom - thick - off); }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // square blocks: the ground above is drawn as bricks, one square per tile
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = colA('ground', 0.55);
+    ctx.fillStyle = colA('ground', 0.10);
+    ctx.lineWidth = 1.5;
+    for (const b of w.blocks) {
+      if (b.x1 < left || b.x0 > right) continue;
+      for (let y = b.top; y < b.bottom - 0.5; y += L.TILE) {
+        for (let x = b.x0; x < b.x1 - 0.5; x += L.TILE) {
+          ctx.fillRect(x + 1, y + 1, L.TILE - 2, L.TILE - 2);
+          ctx.strokeRect(x + 1.5, y + 1.5, L.TILE - 3, L.TILE - 3);
+        }
+      }
+    }
+    // floating blocks: the same bricks, in the platform colour so they read as something to land on
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = col('plat');
+    for (const b of w.boxes) {
+      if (b.x1 < left || b.x0 > right) continue;
+      ctx.fillStyle = colA('plat', 0.14);
+      ctx.fillRect(b.x0, b.top, b.x1 - b.x0, b.bottom - b.top);
+      ctx.strokeStyle = col('plat');
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(b.x0, b.top, b.x1 - b.x0, b.bottom - b.top);
+      ctx.strokeStyle = colA('plat', 0.5);
+      ctx.lineWidth = 1.5;
+      for (let y = b.top; y < b.bottom - 0.5; y += L.TILE) for (let x = b.x0; x < b.x1 - 0.5; x += L.TILE) ctx.strokeRect(x + 3, y + 3, L.TILE - 6, L.TILE - 6);
+    }
+    ctx.shadowBlur = 14;
+
+    ctx.shadowColor = col('plat');
+    ctx.strokeStyle = col('plat');
+    ctx.fillStyle = colA('plat', 0.12);
+    for (const p of w.platforms) {
+      if (p.x1 < left || p.x0 > right) continue;
+      const th = L.TILE * L.PLATFORM_THICK;
+      ctx.fillRect(p.x0, p.top, p.x1 - p.x0, th);
+      ctx.strokeRect(p.x0, p.top, p.x1 - p.x0, th);
+    }
+
+    ctx.shadowColor = col('spike');
+    ctx.strokeStyle = col('spike');
+    ctx.fillStyle = colA('spike', 0.25);
+    for (const s of w.spikes) {
+      if (s.x1 < left || s.x0 > right) continue;
+      // pop-up studs: a dashed outline on the floor until the cube is 17 tiles away, then they stand up over 0.2 s.
+      // No flashing, and under reduced motion they are simply up from the trigger.
+      const pop = w.pops.find(q => s.x0 >= q.x0 && s.x1 <= q.x1);
+      if (pop) {
+        const cx = game.cube.x + L.CUBE / 2;
+        if (cx < pop.trigger) { pop.seenAt = undefined; }
+        else if (pop.seenAt === undefined) pop.seenAt = game.cube.t;
+        const up = pop.seenAt === undefined ? 0 : calm ? 1 : Math.min(1, (game.cube.t - pop.seenAt) / 0.2);
+        if (up < 1) {
+          ctx.save(); ctx.setLineDash([4, 5]); ctx.lineWidth = 2; ctx.shadowBlur = 8;
+          ctx.beginPath(); ctx.moveTo(s.x0 + 1, s.base); ctx.lineTo((s.x0 + s.x1) / 2, s.base - L.TILE * 0.9); ctx.lineTo(s.x1 - 1, s.base); ctx.closePath(); ctx.stroke();
+          ctx.restore();
+          if (up <= 0) continue;
+          ctx.beginPath();
+          ctx.moveTo(s.x0 + 1, s.base);
+          ctx.lineTo((s.x0 + s.x1) / 2, s.base - L.TILE * 0.9 * up);
+          ctx.lineTo(s.x1 - 1, s.base);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          continue;
+        }
+      }
+      ctx.beginPath();
+      ctx.moveTo(s.x0 + 1, s.base);
+      ctx.lineTo((s.x0 + s.x1) / 2, s.base - L.TILE * (s.low ? 0.5 : 0.9));
+      ctx.lineTo(s.x1 - 1, s.base);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    const t = game.cube.t;
+    const cube = game.cube;
+
+    // warp walls: barred red, tall enough to be seen from far; the portals are pixel rings with pixels streaming off them
+    ctx.shadowColor = col('spike'); ctx.shadowBlur = 14;
+    for (const q of w.walls) {
+      if (q.x1 < left || q.x0 > right) continue;
+      const base = q.top + L.WARP_WALL_H * L.TILE;
+      ctx.fillStyle = colA('spike', 0.2); ctx.fillRect(q.x0, q.top, q.x1 - q.x0, base - q.top);
+      ctx.strokeStyle = col('spike'); ctx.lineWidth = 3; ctx.strokeRect(q.x0, q.top, q.x1 - q.x0, base - q.top);
+      ctx.lineWidth = 2; ctx.beginPath();
+      for (let y = q.top + 14; y < base; y += 22) { ctx.moveTo(q.x0, y); ctx.lineTo(q.x1, y - 12); }
+      ctx.stroke();
+    }
+    // laser gates: a full-height beam between two emitters, pulsing, gone once it has been broken
+    for (const q of w.gates) {
+      if (q.x1 < left || q.x0 > right || game.cube.broken[q.id]) continue;
+      if (q.kind === 'drop') {
+        // a spiked block hanging in the sky with its landing marked on the ground; it falls when the cube gets near
+        const top = L.dropTop(q, game.cube), landed = top >= q.hangTop + q.fall - 0.5;
+        const shake = (calm || game.cube.dropAt[q.id] !== undefined) ? 0 : Math.sin(t * 40) * 1.2;
+        if (!landed) {
+          ctx.setLineDash([8, 8]); ctx.strokeStyle = colA('spike', 0.45); ctx.lineWidth = 2; ctx.shadowBlur = 0;
+          ctx.strokeRect(q.x0, q.y - q.h, q.x1 - q.x0, q.h); ctx.setLineDash([]);
+        }
+        ctx.shadowColor = col('spike'); ctx.shadowBlur = 14;
+        ctx.fillStyle = colA('spike', 0.2); ctx.fillRect(q.x0 + shake, top, q.x1 - q.x0, q.h);
+        ctx.strokeStyle = col('spike'); ctx.lineWidth = 3; ctx.strokeRect(q.x0 + shake, top, q.x1 - q.x0, q.h);
+        ctx.fillStyle = col('spike');
+        for (let x = q.x0; x < q.x1 - 1; x += L.TILE) {
+          ctx.beginPath(); ctx.moveTo(x + 3 + shake, top + q.h); ctx.lineTo(x + L.TILE / 2 + shake, top + q.h + 11); ctx.lineTo(x + L.TILE - 3 + shake, top + q.h); ctx.closePath(); ctx.fill();
+        }
+        continue;
+      }
+      const wdt = q.x1 - q.x0, pulse = 0.55 + 0.25 * Math.sin(t * 9 + q.x0);
+      ctx.shadowColor = col('spike'); ctx.shadowBlur = 18;
+      ctx.fillStyle = `rgba(255,60,90,${calm ? 0.45 : pulse})`;
+      ctx.fillRect(q.x0 + wdt * 0.3, -40, wdt * 0.4, q.y + 40);
+      ctx.fillStyle = col('spike'); ctx.fillRect(q.x0 + wdt * 0.44, -40, wdt * 0.12, q.y + 40);
+      ctx.strokeStyle = col('spike'); ctx.lineWidth = 3;
+      ctx.strokeRect(q.x0, q.y - 14, wdt, 14);
+      ctx.fillStyle = colA('spike', 0.4); ctx.fillRect(q.x0, q.y - 14, wdt, 14);
+    }
+    // shield pickups: a glowing hexagon with a shield mark, bobbing, and chevrons over it so it is seen from far
+    for (const q of w.pickups) {
+      if (q.x < left || q.x > right || game.cube.picked[q.id]) continue;
+      const bob = Math.sin(t * 4 + q.x * 0.01) * 3;
+      ctx.shadowColor = '#7dffb0'; ctx.shadowBlur = 14; ctx.strokeStyle = '#7dffb0'; ctx.fillStyle = 'rgba(125,255,176,0.16)'; ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) { const a = (i / 6) * Math.PI * 2 + Math.PI / 6; ctx.lineTo(q.x + Math.cos(a) * q.r * 1.15, q.y + bob + Math.sin(a) * q.r * 1.15); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(q.x - q.r * 0.45, q.y + bob - q.r * 0.3); ctx.lineTo(q.x, q.y + bob - q.r * 0.62); ctx.lineTo(q.x + q.r * 0.45, q.y + bob - q.r * 0.3);
+      ctx.lineTo(q.x + q.r * 0.45, q.y + bob + q.r * 0.15); ctx.lineTo(q.x, q.y + bob + q.r * 0.55); ctx.lineTo(q.x - q.r * 0.45, q.y + bob + q.r * 0.15); ctx.closePath(); ctx.stroke();
+      ctx.globalAlpha = 0.7;
+      for (let i = 0; i < 2; i++) {
+        const cy = q.y - 34 - i * 12 - ((t * 30) % 12);
+        ctx.beginPath(); ctx.moveTo(q.x - 6, cy + 3); ctx.lineTo(q.x, cy - 3); ctx.lineTo(q.x + 6, cy + 3); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // bounce pads: a spring with a bright cap, drawn tall enough to read from far
+    for (const q of w.bounces) {
+      if (q.x1 < left || q.x0 > right) continue;
+      const wdt = q.x1 - q.x0, base = q.top, bob = Math.sin(t * 7) * 1.5;
+      ctx.shadowColor = col('plat'); ctx.shadowBlur = 14;
+      ctx.fillStyle = colA('plat', 0.25); ctx.fillRect(q.x0, base - 8, wdt, 8);
+      ctx.strokeStyle = col('plat'); ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(q.x0 + 4, base);
+      for (let i = 0; i < 6; i++) ctx.lineTo(q.x0 + 4 + ((wdt - 8) * (i + 0.5)) / 6, base - 4 - (i % 2 ? 6 : 0));
+      ctx.lineTo(q.x1 - 4, base);
+      ctx.stroke();
+      ctx.fillStyle = col('plat'); ctx.fillRect(q.x0, base - 16 + bob, wdt, 4);
+      // chevrons above it pointing up
+      ctx.lineWidth = 2; ctx.globalAlpha = 0.7;
+      for (let i = 0; i < 3; i++) {
+        const cy = base - 34 - i * 14 - ((t * 40) % 14), cx = (q.x0 + q.x1) / 2;
+        ctx.beginPath(); ctx.moveTo(cx - 7, cy + 4); ctx.lineTo(cx, cy - 3); ctx.lineTo(cx + 7, cy + 4); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // flip portals: a white pixel ring with pixels streaming up and down
+    for (const q of w.flips) {
+      if (q.x < left || q.x > right) continue;
+      const cy = q.y - L.TILE * 1.25, rx = L.TILE * 0.55, ry = L.TILE * 1.25;
+      ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 12; ctx.fillStyle = '#ffffff';
+      for (let i = 0; i < 28; i++) {
+        const a = (i / 28) * Math.PI * 2;
+        ctx.fillRect(Math.round((q.x + Math.cos(a) * rx) / 3) * 3, Math.round((cy + Math.sin(a) * ry) / 3) * 3, 3, 3);
+      }
+      for (let i = 0; i < 16; i++) {
+        const ph = (t * 0.9 + i / 16) % 1;
+        ctx.globalAlpha = 1 - ph;
+        const sx = q.x + (((i * 7) % 11) / 11 - 0.5) * rx * 1.6;
+        const dy = (i % 2 ? 1 : -1) * ph * L.TILE * 1.5;
+        ctx.fillRect(Math.round(sx / 3) * 3, Math.round((cy + dy) / 3) * 3, 3, 3);
+      }
+      ctx.globalAlpha = 1;
+    }
+    for (const q of w.warps) {
+      if (q.bx < left || q.ax > right) continue;
+      for (const [x, colName, dir] of [[q.ax, 'accent', -1], [q.bx, 'plat', 1]]) {
+        if (x < left || x > right) continue;
+        const cy = q.y - L.TILE * 1.25, rx = L.TILE * 0.55, ry = L.TILE * 1.25;
+        ctx.shadowColor = col(colName); ctx.shadowBlur = 12; ctx.fillStyle = col(colName);
+        for (let i = 0; i < 28; i++) {
+          const a = (i / 28) * Math.PI * 2;
+          ctx.fillRect(Math.round((x + Math.cos(a) * rx) / 3) * 3, Math.round((cy + Math.sin(a) * ry) / 3) * 3, 3, 3);
+        }
+        for (let i = 0; i < 16; i++) {
+          const ph = (t * 0.9 + i / 16) % 1;
+          const a = (i * 2.399) % (Math.PI * 2);
+          ctx.globalAlpha = 1 - ph;
+          ctx.fillRect(Math.round((x + dir * ph * L.TILE * 1.6) / 3) * 3, Math.round((cy + Math.sin(a) * ry * 0.9) / 3) * 3, 3, 3);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // moving platforms bob on a rail
+    ctx.shadowColor = col('plat'); ctx.shadowBlur = 12; ctx.strokeStyle = col('plat'); ctx.lineWidth = 3;
+    ctx.fillStyle = colA('plat', 0.16);
+    for (const m of w.movers) {
+      if (m.x1 < left || m.x0 > right) continue;
+      const top = L.moverTop(m, t);
+      const th = L.TILE * L.PLATFORM_THICK;
+      ctx.save();
+      ctx.globalAlpha = 0.25; ctx.lineWidth = 1.5; ctx.setLineDash([3, 5]);
+      ctx.beginPath(); ctx.moveTo((m.x0 + m.x1) / 2, m.base - m.amp - 8); ctx.lineTo((m.x0 + m.x1) / 2, m.base + m.amp + 8); ctx.stroke();
+      ctx.restore();
+      ctx.fillRect(m.x0, top, m.x1 - m.x0, th);
+      ctx.strokeRect(m.x0, top, m.x1 - m.x0, th);
+    }
+
+    // crumbling tiles shake once touched, then drop away
+    for (const p of w.crumbles) {
+      if (p.x1 < left || p.x0 > right) continue;
+      if (L.crumbleGone(cube, p.id)) continue;
+      const t0 = cube.cr[p.id];
+      const age = t0 === undefined ? 0 : t - t0;
+      const shake = age > L.CRUMBLE_DELAY - L.CRUMBLE_SHAKE ? Math.sin(t * 80) * 2 : 0;
+      const th = L.TILE * L.PLATFORM_THICK + 4;
+      ctx.shadowColor = '#ff8a2b'; ctx.strokeStyle = '#ff8a2b'; ctx.fillStyle = 'rgba(255, 138, 43, 0.18)';
+      ctx.globalAlpha = t0 === undefined ? 1 : Math.max(0.35, 1 - age / L.CRUMBLE_DELAY * 0.6);
+      ctx.fillRect(p.x0 + shake, p.top, p.x1 - p.x0, th);
+      ctx.strokeRect(p.x0 + shake, p.top, p.x1 - p.x0, th);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let x = p.x0 + L.TILE; x < p.x1 - 2; x += L.TILE) {
+        ctx.moveTo(x + shake, p.top); ctx.lineTo(x - 5 + shake, p.top + th * 0.55); ctx.lineTo(x + 4 + shake, p.top + th);
+      }
+      ctx.stroke();
+      ctx.lineWidth = 3; ctx.globalAlpha = 1;
+    }
+
+    // tunnel roofs with warning stripes, and the guide markers that show the hop
+    for (const r of w.ceilings) {
+      if (r.x1 < left || r.x0 > right) continue;
+      ctx.shadowColor = col('spike'); ctx.strokeStyle = col('spike'); ctx.fillStyle = colA('spike', 0.14); ctx.lineWidth = 3;
+      ctx.fillRect(r.x0, -100, r.x1 - r.x0, r.bottom + 100);
+      ctx.beginPath(); ctx.moveTo(r.x0, r.bottom); ctx.lineTo(r.x1, r.bottom); ctx.stroke();
+      ctx.lineWidth = 2; ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      for (let x = r.x0 - 20; x < r.x1; x += 22) { ctx.moveTo(Math.max(r.x0, x), r.bottom - 14 * (x < r.x0 ? 0 : 1)); ctx.lineTo(Math.min(r.x1, x + 14), r.bottom); }
+      ctx.stroke();
+      ctx.globalAlpha = 1; ctx.lineWidth = 3;
+    }
+    // orbs: pulsing rings; a used one is dim
+    for (const o of w.orbs) {
+      if (o.x + o.r < left || o.x - o.r > right) continue;
+      const used = game.cube.orbs[o.id];
+      const r = o.r * (0.85 + 0.08 * Math.sin(t * 5 + o.x));
+      ctx.shadowColor = col('plat'); ctx.shadowBlur = used ? 0 : 14; ctx.strokeStyle = col('plat'); ctx.lineWidth = 3;
+      ctx.globalAlpha = used ? 0.25 : 1;
+      ctx.beginPath(); ctx.arc(o.x, o.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = colA('plat', 0.35); ctx.beginPath(); ctx.arc(o.x, o.y, r * 0.35, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    // gems trace the path of the jump to make: the first is where to take off. They are markers only.
+    ctx.shadowColor = col('plat'); ctx.shadowBlur = 8; ctx.strokeStyle = col('plat'); ctx.fillStyle = colA('plat', 0.4); ctx.lineWidth = 2;
+    const cxNow = game.cube.x + L.CUBE / 2;
+    for (const g of w.guides) {
+      if (g.x < left || g.x > right || g.x < cxNow - 6) continue;
+      const k = 7 + Math.sin(t * 6 + g.x * 0.05) * 0.8;
+      ctx.beginPath(); ctx.moveTo(g.x, g.y - k); ctx.lineTo(g.x + k * 0.7, g.y); ctx.lineTo(g.x, g.y + k); ctx.lineTo(g.x - k * 0.7, g.y); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    const bmx = L.bestMarkerX(game);
+    if (bmx !== null && bmx > left - 60 && bmx < right + 60) {
+      ctx.shadowColor = '#ffee33'; ctx.shadowBlur = 10; ctx.strokeStyle = '#ffee33'; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 8]);
+      ctx.beginPath(); ctx.moveTo(bmx, 96); ctx.lineTo(bmx, L.FLOOR_Y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0; ctx.fillStyle = '#ffee33';
+      ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText('BEST', bmx + 8, 112);
+    }
+    ctx.restore();
+  }
+
+  // the boost ribbon: one filled strip, full width at the cube and tapering to nothing at the tail
+  function drawTrail(camX) {
+    const n = trail.length;
+    if (n < 3) return;
+    const left = [], right = [];
+    for (let i = 0; i < n; i++) {
+      const a = trail[Math.max(0, i - 1)], b = trail[Math.min(n - 1, i + 1)];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const w = TRAIL_W * 0.5 * (i / (n - 1));
+      const x = trail[i].x - camX, y = trail[i].y;
+      left.push(x - dy / d * w, y + dx / d * w);
+      right.push(x + dy / d * w, y - dx / d * w);
+    }
+    const tail = trail[0], head = trail[n - 1];
+    const g = ctx.createLinearGradient(tail.x - camX, tail.y, head.x - camX, head.y);
+    g.addColorStop(0, colA('accent', 0));
+    g.addColorStop(1, colA('accent', TRAIL_ALPHA * (calm ? 0.5 : 1)));
+    ctx.save();
+    ctx.fillStyle = g;
+    ctx.shadowColor = col('accent'); ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(left[0], left[1]);
+    for (let i = 2; i < left.length; i += 2) ctx.lineTo(left[i], left[i + 1]);
+    for (let i = right.length - 2; i >= 0; i -= 2) ctx.lineTo(right[i], right[i + 1]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawCube() {
+    const c = game.cube;
+    const cx = CUBE_SCREEN_X + L.CUBE / 2;
+    const cy = c.y + L.CUBE / 2;
+    const bottom = c.y + L.CUBE;
+    const sy = 1 - squash, sx = 1 + squash;
+
+    ctx.save();
+    if (c.inv > 0) ctx.globalAlpha = 0.55;   // steady, not blinking: nothing here strobes
+    ctx.translate(cx, bottom);
+    if (c.onGround) ctx.scale(sx, sy);
+    ctx.translate(0, -(bottom - cy));
+    ctx.rotate(c.angle);
+    const u = L.CUBE / 10;
+    // cube level 5: a soft aura, breathing slowly (held still under reduced motion)
+    if (cubeLevel >= 5) {
+      const breath = calm ? 0.5 : 0.5 + 0.5 * Math.sin(shakeClock * 2.4);
+      ctx.fillStyle = CUBE_COL + '1a'; ctx.shadowColor = CUBE_COL; ctx.shadowBlur = 18;
+      ctx.beginPath(); ctx.arc(0, 0, (8.2 + breath) * u, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.shadowColor = CUBE_COL;
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = CUBE_COL + '2e';   // 0x2e is 18% alpha
+    ctx.strokeStyle = CUBE_COL;
+    ctx.lineWidth = 3;
+    ctx.fillRect(-L.CUBE / 2, -L.CUBE / 2, L.CUBE, L.CUBE);
+    ctx.strokeRect(-L.CUBE / 2, -L.CUBE / 2, L.CUBE, L.CUBE);
+    // cube level 3: an inner core square
+    if (cubeLevel >= 3) {
+      ctx.shadowBlur = 0; ctx.lineWidth = 1.5; ctx.globalAlpha *= 0.7;
+      ctx.strokeRect(-2.2 * u, 0.6 * u, 4.4 * u, 2.8 * u);
+      ctx.globalAlpha /= 0.7;
+    }
+    // every cube has eyes
+    ctx.shadowBlur = 0; ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-3.2 * u, -2.2 * u, 1.6 * u, 2.2 * u);
+    ctx.fillRect(1.6 * u, -2.2 * u, 1.6 * u, 2.2 * u);
+    drawWear(u, look);
+    // a held shield is one small ring round the cube, turned with it
+    if (c.shield) {
+      ctx.shadowColor = '#7dffb0'; ctx.shadowBlur = 8; ctx.strokeStyle = '#7dffb0'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, L.CUBE * 0.82, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // what the cube wears, in its own turned frame (top edge at y = -5u, facing right): one head item, shades, headphones
+  function drawWear(u, look) {
+    ctx.shadowBlur = 0; ctx.lineJoin = 'round';
+    if (look.head === 'antenna') {
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, -5 * u); ctx.lineTo(1.2 * u, -8.6 * u); ctx.stroke();
+      ctx.fillStyle = CUBE_COL; ctx.shadowColor = CUBE_COL; ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(1.2 * u, -9.3 * u, 1.1 * u, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else if (look.head === 'cap') {
+      ctx.fillStyle = CUBE_COL; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(-4.4 * u, -5 * u); ctx.quadraticCurveTo(-4.2 * u, -8.6 * u, 0, -8.6 * u); ctx.quadraticCurveTo(4.2 * u, -8.6 * u, 4.4 * u, -5 * u); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(3 * u, -5.6 * u, 4.4 * u, 1.1 * u);   // the brim points the way the cube runs
+    } else if (look.head === 'crown') {
+      ctx.fillStyle = '#ffd700'; ctx.strokeStyle = '#fff3a0'; ctx.lineWidth = 1; ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.moveTo(-4 * u, -5 * u); ctx.lineTo(-4 * u, -8.8 * u); ctx.lineTo(-2 * u, -6.8 * u); ctx.lineTo(0, -9.4 * u);
+      ctx.lineTo(2 * u, -6.8 * u); ctx.lineTo(4 * u, -8.8 * u); ctx.lineTo(4 * u, -5 * u); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+    if (look.face === 'shades') {
+      ctx.fillStyle = '#05060f'; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1;
+      ctx.fillRect(-4 * u, -2.8 * u, 3.2 * u, 2.4 * u); ctx.strokeRect(-4 * u, -2.8 * u, 3.2 * u, 2.4 * u);
+      ctx.fillRect(0.8 * u, -2.8 * u, 3.2 * u, 2.4 * u); ctx.strokeRect(0.8 * u, -2.8 * u, 3.2 * u, 2.4 * u);
+      ctx.beginPath(); ctx.moveTo(-0.8 * u, -2.2 * u); ctx.lineTo(0.8 * u, -2.2 * u); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';   // a glint on each lens
+      ctx.fillRect(-3.5 * u, -2.4 * u, 0.8 * u, 0.5 * u); ctx.fillRect(1.3 * u, -2.4 * u, 0.8 * u, 0.5 * u);
+    }
+    if (look.ears === 'headphones') {
+      ctx.strokeStyle = '#c8d0ff'; ctx.lineWidth = 1.8;
+      ctx.beginPath(); ctx.arc(0, -1 * u, 6.2 * u, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke();
+      ctx.fillStyle = '#c8d0ff';
+      ctx.fillRect(-6.6 * u, -2.6 * u, 1.8 * u, 3.6 * u);
+      ctx.fillRect(4.8 * u, -2.6 * u, 1.8 * u, 3.6 * u);
+    }
+  }
+
+  // ---- the retry-screen picker: colours on one row, wearables on the next; locked ones show the level that unlocks them
+  const PICK_SIZE = 24, PICK_HIT = 17, PICK_Y = 268;
+  const unlockLevel = id => 1 + L.CUBE_LEVELS.findIndex(q => q.colors.includes(id) || q.wear.includes(id));
+  function pickerShown() { return game.state === 'dead' && L.canRestart(game); }
+  function pickerItems() {
+    const u = L.unlockedAt(cubeLevel), out = [];
+    const colors = Object.keys(CUBE_COLORS), wear = L.unlockedAt(L.CUBE_LEVELS.length).wear;   // both in unlock order
+    colors.forEach((id, i) => out.push({ kind: 'color', id, x: viewW / 2 + (i - (colors.length - 1) / 2) * 36, y: PICK_Y, locked: !u.colors.includes(id), on: look.color === id }));
+    wear.forEach((id, i) => out.push({ kind: 'wear', id, x: viewW / 2 + (i - (wear.length - 1) / 2) * 44, y: PICK_Y + 42, locked: !u.wear.includes(id), on: look[L.WEAR_SLOTS[id]] === id }));
+    return out;
+  }
+  function equip(q) {
+    const next = Object.assign({}, look);
+    if (q.kind === 'color') next.color = q.id;
+    else { const slot = L.WEAR_SLOTS[q.id]; next[slot] = look[slot] === q.id ? null : q.id; }   // tap again to take it off
+    look = previewLevel ? L.sanitizeLook(next, previewLevel) : store.setLook(next);
+    CUBE_COL = cubeColNow();
+  }
+  function drawPicker() {
+    const items = pickerItems();
+    ctx.save();
+    ctx.fillStyle = 'rgba(5, 6, 15, 0.72)';
+    ctx.fillRect(viewW / 2 - 200, PICK_Y - 30, 400, 120);
+    for (const q of items) {
+      ctx.save();
+      ctx.translate(q.x, q.y);
+      ctx.globalAlpha = q.locked ? 0.3 : 1;
+      if (q.kind === 'color') {
+        const c = q.id === 'prism' ? hueHex((prismT / PRISM_S) * 360 % 360) : CUBE_COLORS[q.id];
+        ctx.fillStyle = c; ctx.shadowColor = c; ctx.shadowBlur = q.on ? 12 : 0;
+        ctx.fillRect(-PICK_SIZE / 2, -PICK_SIZE / 2, PICK_SIZE, PICK_SIZE);
+      } else {
+        // a small cube in the current colour wearing just this one thing
+        const k = PICK_SIZE / L.CUBE, u = L.CUBE / 10;
+        ctx.scale(k, k);
+        ctx.strokeStyle = CUBE_COL; ctx.lineWidth = 2.5;
+        ctx.strokeRect(-L.CUBE / 2, -L.CUBE / 2 + 3 * u, L.CUBE, L.CUBE);
+        ctx.translate(0, 3 * u);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(-3.2 * u, -2.2 * u, 1.6 * u, 2.2 * u); ctx.fillRect(1.6 * u, -2.2 * u, 1.6 * u, 2.2 * u);
+        drawWear(u, { head: q.id, face: q.id, ears: q.id });
+      }
+      ctx.restore();
+      if (q.on) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.strokeRect(q.x - PICK_HIT, q.y - PICK_HIT, PICK_HIT * 2, PICK_HIT * 2); }
+      if (q.locked) drawText('L' + unlockLevel(q.id), q.x, q.y + 5, 13, '#ffffff');
+    }
+    const lv = L.CUBE_LEVELS[cubeLevel - 1], nextLv = L.CUBE_LEVELS[cubeLevel];
+    const total = previewLevel ? lv.at : store.getTotal();
+    drawText(`LV ${cubeLevel} ${lv.name.toUpperCase()}` + (nextLv ? `   ${total} / ${nextLv.at} m` : ''), viewW / 2, PICK_Y + 80, 12, '#9fb4ff');
+    ctx.restore();
+  }
+
+  function drawParticles(camX, back) {
+    ctx.save();
+    ctx.shadowColor = CUBE_COL;
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = CUBE_COL;
+    ctx.lineWidth = 2;
+    for (const p of particles) {
+      if (!!p.back !== !!back) continue;
+      ctx.globalAlpha = Math.max(0, 1 - p.age / p.life);
+      if (p.col) { ctx.strokeStyle = p.col; ctx.shadowColor = p.col; } else { ctx.strokeStyle = CUBE_COL; ctx.shadowColor = CUBE_COL; }
+      ctx.save();
+      ctx.translate(p.x - camX, p.y);
+      ctx.rotate(p.rot);
+      if (p.fill) { ctx.fillStyle = p.col; ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size); }
+      else ctx.strokeRect(-p.size / 2, -p.size / 2, p.size, p.size);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function drawText(text, x, y, size, color, align) {
+    ctx.save();
+    ctx.textAlign = align || 'center';
+    ctx.font = `600 ${size}px system-ui, sans-serif`;
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  function drawHud(fps) {
+    const m = L.meters(game);
+    const best = Math.max(bestCache, m);
+    ctx.save();
+    drawText(String(m), viewW / 2, 62, 46, '#ffffff');
+    drawText(showcase ? `${showcase.toUpperCase()}   LV ${game.level + 1}` : `BEST ${best}   LV ${game.level + 1}`, viewW / 2, 84, 13, col('accent'));
+    ctx.fillStyle = col('accent');
+    ctx.fillRect(viewW / 2 - 60, 92, 120, 2);
+    ctx.restore();
+    if (game.state === 'ready') {
+      drawText('TAP TO START', viewW / 2, 170, 26, col('accent'));
+    } else if (game.state === 'dead' && L.canRestart(game)) {
+      if (lastRun && lastRun.isNewBest) drawText('NEW BEST', viewW / 2, 150, 30, '#ffee33');
+      drawText('TAP TO RETRY', viewW / 2, 190, 22, col('accent'));
+      if (lastRun && lastRun.levelUp) drawText(`CUBE LEVEL ${lastRun.level} · ${L.CUBE_LEVELS[lastRun.level - 1].name.toUpperCase()}`, viewW / 2, 222, 18, '#ffd700');
+      drawPicker();
+    } else if (bestFlash > 0) {
+      ctx.globalAlpha = Math.min(1, bestFlash);
+      drawText('NEW BEST', viewW / 2, 130, 26, '#ffee33');
+      ctx.globalAlpha = 1;
+    }
+    if (debug) {
+      ctx.fillStyle = '#9fb4ff';
+      ctx.font = '14px ui-monospace, Menlo, monospace';
+      ctx.fillText(`fps ${fps.toFixed(0)}  speed ${L.gameSpeed(game).toFixed(0)}  chunk ${game.world.lastName}  ${game.state}${game.deadReason ? ' (' + game.deadReason + ')' : ''}`, 12, 120);
+      const top = Object.keys(deaths).sort((a, b) => deaths[b] - deaths[a]).slice(0, 5);
+      const ps = perfStats(performance.now());
+      if (ps) ctx.fillText(`work ${ps.work.toFixed(1)} / worst ${ps.workMax.toFixed(1)} ms   gap ${ps.gap.toFixed(1)} / worst ${ps.gapMax.toFixed(1)} ms   particles ${particles.length}   glow ${glow ? 'on' : 'off'}   ${canvas.width}x${canvas.height}   (L burst, G glow, R res)`, 12, 138);
+      ctx.fillText(`deaths this session: ${deathTotal}`, 12, 158);
+      top.forEach((k, i) => ctx.fillText(`  ${deaths[k]}  ${k}`, 12, 176 + i * 16));
+    }
+  }
+
+  // The level-up moment is drawn BEHIND the track (flash, rings, rays, particles) so hazards and the
+  // tunnel start ring are never covered; only the title sits on top, in the upper part of the screen.
+  function drawLevelBack() {
+    if (levelFx <= 0 || calm) return;
+    const t = levelFx;
+    const cx = CUBE_SCREEN_X + L.CUBE / 2, cy = screenY(game.cube.y + L.CUBE / 2);
+    ctx.save();
+    if (t < 0.25) {
+      ctx.fillStyle = `rgba(255, 255, 255, ${0.4 * (1 - t / 0.25)})`;
+      ctx.fillRect(0, 0, viewW, VIEW_H);
+    }
+    ctx.strokeStyle = col('accent'); ctx.shadowColor = col('accent'); ctx.shadowBlur = 16;
+    for (const r of rings) {
+      if (r.age <= 0) continue;
+      ctx.globalAlpha = (1 - r.age) * 0.8;
+      ctx.lineWidth = 1 + 7 * (1 - r.age);
+      ctx.beginPath(); ctx.arc(cx, cy, 20 + r.age * viewW * 0.85, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (t < 0.7) {
+      const k = t / 0.7;
+      ctx.globalAlpha = (1 - k) * 0.7; ctx.lineWidth = 2; ctx.shadowBlur = 8;
+      ctx.beginPath();
+      for (let i = 0; i < 28; i++) {
+        const a = (i / 28) * Math.PI * 2 + 0.1;
+        const r0 = 50 + k * 520, r1 = r0 + 170 * (1 - k);
+        ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+        ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawLevelTitle() {
+    if (levelFx <= 0) return;
+    const t = levelFx;
+    const fade = t > 1.1 ? Math.max(0, 1 - (t - 1.1) / 0.5) : 1;
+    const pop = calm ? 1 : (t < 0.25 ? 1.8 - 0.8 * (t / 0.25) : 1);
+    ctx.save();
+    ctx.globalAlpha = fade;
+    drawText(`LEVEL ${game.level + 1}`, viewW / 2, VIEW_H * 0.34, (calm ? 30 : 56) * pop, col('accent'));
+    ctx.restore();
+  }
+
+  function render(fps) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = col('bg');
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+
+    const camX = game.cube.x - CUBE_SCREEN_X;
+    if (shakeT > 0) {
+      // a steady wobble that eases out, rather than a fresh random jump every frame
+      const m = SHAKE_PX * shakeT * shakeT / shakeDur;
+      ctx.translate(Math.sin(shakeClock * 61) * m * 0.5, Math.sin(shakeClock * 47 + 1.3) * m * 0.5);
+    }
+    drawBackdrop(camX);
+    drawLevelBack();
+    drawParticles(camX, true);
+    ctx.save();
+    if (isFlipped()) { ctx.translate(0, VIEW_H); ctx.scale(1, -1); }
+    drawWorld(camX);
+    drawTrail(camX);
+    if (game.state !== 'dead') drawCube();
+    drawParticles(camX, false);
+    ctx.restore();
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    const slowNow = L.timeScale(game.world, game.cube);
+    if (slowNow < 0.97) {
+      const gv = ctx.createRadialGradient(viewW / 2, VIEW_H / 2, VIEW_H * 0.3, viewW / 2, VIEW_H / 2, VIEW_H * 0.9);
+      gv.addColorStop(0, 'rgba(110,168,255,0)'); gv.addColorStop(1, `rgba(110,168,255,${(1 - slowNow) * 0.5})`);
+      ctx.fillStyle = gv; ctx.fillRect(0, 0, viewW, VIEW_H);
+    }
+    if (warpFlash > 0) { ctx.fillStyle = `rgba(255,255,255,${0.3 * (warpFlash / WARP_FLASH_S)})`; ctx.fillRect(0, 0, viewW, VIEW_H); }
+    drawHud(fps);
+    drawLevelTitle();
+    if (bench) drawBench();
+    if (portrait) {
+      ctx.fillStyle = 'rgba(5, 6, 15, 0.94)';
+      ctx.fillRect(0, 0, viewW, VIEW_H);
+      drawText('Rotate your phone', viewW / 2, VIEW_H / 2, 22, '#00f0ff');
+    }
+  }
+
+  let last = performance.now();
+  let acc = 0;
+  let fps = 60;
+
+  // Frame timing for the D overlay, over the last 2 s: work is the time spent updating and drawing a frame, gap is
+  // the time between frames (over 16.7 ms on a 60 Hz screen means a frame was dropped)
+  const PERF_N = 512, PERF_WINDOW_MS = 2000;
+  const perfAt = new Float64Array(PERF_N), perfWork = new Float64Array(PERF_N), perfGap = new Float64Array(PERF_N);
+  let perfI = 0;
+  function perfStats(now) {
+    let n = 0, work = 0, workMax = 0, gap = 0, gapMax = 0;
+    for (let i = 0; i < PERF_N; i++) {
+      if (perfAt[i] === 0 || now - perfAt[i] > PERF_WINDOW_MS) continue;
+      n++; work += perfWork[i]; gap += perfGap[i];
+      if (perfWork[i] > workMax) workMax = perfWork[i];
+      if (perfGap[i] > gapMax) gapMax = perfGap[i];
+    }
+    return n ? { work: work / n, workMax, gap: gap / n, gapMax } : null;
+  }
+
+  // the bench cube: flies at the level's speed times the boost, a few tiles up, through everything
+  function benchStep(dt) {
+    const c = game.cube, events = [];
+    if (benchRound < 0) { benchRound = 0; benchT = 0; debug = true; benchSet(); }
+    game.state = 'running';
+    c.boostX0 = c.x - (L.BOOST_RAMP_TILES + 1) * L.TILE;
+    c.x += L.gameSpeed(game) * L.boostMul(c) * dt;
+    c.y = L.FLOOR_Y - BENCH_HOVER_TILES * L.TILE - L.CUBE; c.vy = 0; c.onGround = false;
+    c.angle += L.SPIN * dt;
+    L.extendWorld(game.world, c.x, L.distancePx(game));
+    L.pruneWorld(game.world, c.x - L.TILE * 20);
+    benchBurst += dt;
+    if (benchBurst >= BENCH_BURST_S) { benchBurst = 0; events.push('level'); }
+    return events;
+  }
+  function benchSet() {
+    const r = benchRounds[Math.min(benchRound, benchRounds.length - 1)];
+    const done = benchRound >= benchRounds.length;
+    glow = done || r.glow;
+    if (lowRes !== (!done && r.lowRes)) { lowRes = !done && r.lowRes; resize(); }
+  }
+  function benchTick(dt, gapMs, workMs) {
+    if (benchRound < 0 || benchRound >= benchRounds.length) return;
+    benchT += dt;
+    const r = benchRounds[benchRound];
+    if (benchT > BENCH_SKIP_S) {
+      r.n++; r.gap += gapMs;
+      if (gapMs > r.gapMax) r.gapMax = gapMs;
+      if (gapMs > 17) r.over17++;
+      if (gapMs > 25) r.over25++;
+      if (workMs > r.workMax) r.workMax = workMs;
+    }
+    if (benchT >= BENCH_ROUND_S) { benchRound++; benchT = 0; benchSet(); }
+  }
+  function drawBench() {
+    ctx.fillStyle = 'rgba(5, 6, 15, 0.85)';
+    ctx.fillRect(viewW - 470, 104, 458, 40 + benchRounds.length * 18);
+    ctx.fillStyle = '#9fb4ff';
+    ctx.font = '14px ui-monospace, Menlo, monospace';
+    const head = benchRound < benchRounds.length ? `BENCH round ${benchRound + 1} of ${benchRounds.length}: ${benchRounds[benchRound].name}` : 'BENCH done';
+    ctx.fillText(head, viewW - 458, 124);
+    benchRounds.forEach((r, i) => {
+      const row = r.n ? `${r.name.padEnd(9)} gap ${(r.gap / r.n).toFixed(1)} / worst ${r.gapMax.toFixed(1)} ms  >17: ${r.over17}  >25: ${r.over25}  work ${r.workMax.toFixed(1)}` : `${r.name.padEnd(9)} ...`;
+      ctx.fillText(row, viewW - 458, 144 + i * 18);
+    });
+  }
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (paused) return;
+    const t0 = performance.now();
+    const gapMs = now - last;
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
+    acc += dt;
+    while (acc >= STEP) {
+      if (!portrait) update(STEP);
+      acc -= STEP;
+    }
+    render(fps);
+    perfAt[perfI] = now; perfWork[perfI] = performance.now() - t0; perfGap[perfI] = gapMs;
+    perfI = (perfI + 1) % PERF_N;
+    if (bench) benchTick(dt, gapMs, perfWork[(perfI + PERF_N - 1) % PERF_N]);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
