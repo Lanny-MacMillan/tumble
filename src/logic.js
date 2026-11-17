@@ -1161,10 +1161,10 @@
   // is read as a version 2 one whose lifetime distance starts at that best.
   function createStore(getStorage) {
     const cnt = v => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
-    let mem = { best: 0, total: 0, look: null };
+    let mem = { best: 0, total: 0, look: null, muted: false };
 
     function readSaved() {
-      const none = { best: 0, total: 0, look: null };
+      const none = { best: 0, total: 0, look: null, muted: false };
       try {
         const ls = getStorage();
         if (!ls) return none;
@@ -1174,10 +1174,10 @@
         if (!rec || typeof rec !== 'object') return none;
         const best = cnt(rec.best);
         if (best === null) return none;
-        if (rec.v === 1) return { best, total: best, look: null };
+        if (rec.v === 1) return { best, total: best, look: null, muted: false };
         if (rec.v !== SAVE_VERSION) return none;
         const total = cnt(rec.total);
-        return { best, total: Math.max(best, total === null ? best : total), look: rec.look && typeof rec.look === 'object' ? rec.look : null };
+        return { best, total: Math.max(best, total === null ? best : total), look: rec.look && typeof rec.look === 'object' ? rec.look : null, muted: rec.muted === true };
       } catch (e) {
         return none;
       }
@@ -1186,7 +1186,10 @@
     function write() {
       try {
         const ls = getStorage();
-        if (ls) ls.setItem(SAVE_KEY, JSON.stringify({ v: SAVE_VERSION, best: mem.best, total: mem.total, look: mem.look }));
+        // muted is written only when on, so an unmuted record is the same as before the setting existed
+        const rec = { v: SAVE_VERSION, best: mem.best, total: mem.total, look: mem.look };
+        if (mem.muted) rec.muted = true;
+        if (ls) ls.setItem(SAVE_KEY, JSON.stringify(rec));
       } catch (e) { /* memory copy still holds it */ }
     }
 
@@ -1211,6 +1214,14 @@
         mem.look = sanitizeLook(look, cubeLevelFor(mem.total));
         write();
         return mem.look;
+      },
+      // sound on or off: a preference, so the last choice wins rather than the larger number
+      getMuted() { return mem.muted; },
+      setMuted(muted) {
+        sync();
+        mem.muted = !!muted;
+        write();
+        return mem.muted;
       },
       // a finished run: adds its distance to the lifetime total and keeps the best
       recordRun(meters) {

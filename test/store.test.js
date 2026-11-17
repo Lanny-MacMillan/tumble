@@ -277,3 +277,44 @@ test('a practice list serves exactly those chunks, in order, over and over', () 
   const normal = L.newGame(5, true, 0);
   assert.equal(normal.world.sequence, null);
 });
+
+test('mute defaults to off', () => {
+  assert.equal(L.createStore(() => fakeStorage()).getMuted(), false);
+});
+
+test('mute survives a reload and keeps the rest of the record', () => {
+  const ls = fakeStorage();
+  const a = L.createStore(() => ls);
+  a.recordRun(80);
+  assert.equal(a.setMuted(true), true);
+  const b = L.createStore(() => ls);
+  assert.equal(b.getMuted(), true);
+  assert.equal(b.getBest(), 80);
+  assert.equal(b.getTotal(), 80);
+  b.setMuted(false);
+  assert.equal(L.createStore(() => ls).getMuted(), false);
+});
+
+test('an old record without mute reads as unmuted and keeps its best', () => {
+  const v1 = L.createStore(() => fakeStorage({ [L.SAVE_KEY]: JSON.stringify({ v: 1, best: 50 }) }));
+  assert.equal(v1.getMuted(), false);
+  assert.equal(v1.getBest(), 50);
+  const v2 = L.createStore(() => fakeStorage({ [L.SAVE_KEY]: rec(70) }));
+  assert.equal(v2.getMuted(), false);
+  assert.equal(v2.getBest(), 70);
+});
+
+test('mute works with storage blocked', () => {
+  const store = L.createStore(() => { throw new Error('blocked'); });
+  assert.equal(store.setMuted(true), true);
+  assert.equal(store.getMuted(), true);
+});
+
+test('recordRun and setLook keep the mute flag', () => {
+  const ls = fakeStorage();
+  const a = L.createStore(() => ls);
+  a.setMuted(true);
+  a.recordRun(30);
+  a.setLook(L.DEFAULT_LOOK);
+  assert.equal(L.createStore(() => ls).getMuted(), true);
+});
