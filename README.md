@@ -38,6 +38,7 @@ Every metre you run counts toward your lifetime distance, and that raises your c
 
 - **Jump:** tap, click, Space, Up arrow or W. Hold for a higher jump.
 - **Restart:** tap or press Space after you die. On the retry screen, tap a colour or a wearable to put it on.
+- **M:** sound on or off. The choice is remembered.
 - **D:** debug overlay (frame rate, speed, current piece, deaths this session).
 
 ## Run it locally
@@ -62,12 +63,13 @@ These runs never save a best.
 
 ## How it works
 
-Tumble is plain JavaScript and Canvas 2D: no framework, no build step, no dependencies. It is two files.
+Tumble is plain JavaScript, Canvas 2D and WebAudio: no framework, no build step, no dependencies, and no image or sound files. The code is three files.
 
 - `src/logic.js` is the game itself: physics, the track generator, collision, levels and save data. It has no DOM and no timers, so the same file runs in the page and in Node for the tests.
+- `src/audio.js` is the music and sound effects, all synthesized as the game runs.
 - `index.html` is everything you see and touch: input, the game loop, drawing, particles and screen shake.
 
-Both load as classic scripts rather than ES modules, so the game also runs straight from `file://`. `logic.js` attaches itself to a global in the browser and to `module.exports` in Node.
+They load as classic scripts rather than ES modules, so the game also runs straight from `file://`. Each script attaches itself to a global in the browser and to `module.exports` in Node.
 
 ### The loop
 
@@ -98,9 +100,15 @@ A runner that sometimes deals an impossible jump feels awful, so most of the tes
 
 Everything is drawn with Canvas 2D paths and glow. Each level has its own palette and backdrop motif, which fade from one to the next when you level up. Behind the track, three parallax layers move at different fractions of the camera's speed and pulse with it. Particles are capped so a busy moment cannot slow the frame down.
 
+### Sound
+
+Every level has its own song, and its tempo comes from the level's speed: one beat is always 8 tiles of track, so the music runs from about 101 BPM in level 1 to 195 in level 7. A new level's song comes in on the next beat. Songs are short note patterns (drums, bass and a lead line) played by a few synth voices built from oscillators and filtered noise. Slow-time fields slow the music down and drop its pitch along with the world, and a boost opens up its filter so it sounds brighter.
+
+Notes are scheduled a little ahead on the audio clock rather than played from the game loop, so a slow frame never knocks the music off the beat. Sound effects are short synth sounds hung off the same game events the drawing uses: a boing for a jump, a blip for a portal, a light crumble for anything that falls, a crash for a death. Nothing plays until your first tap or key press.
+
 ### Saving
 
-Your best distance, lifetime distance and chosen look are kept in `localStorage` as one small versioned record. Every read and write is wrapped so the game still works, with nothing saved, in a private window or when storage is blocked. A saved look is checked against your cube level when it is loaded, so an edited save cannot wear something that is still locked.
+Your best distance, lifetime distance, chosen look and sound setting are kept in `localStorage` as one small versioned record. Every read and write is wrapped so the game still works, with nothing saved, in a private window or when storage is blocked. A saved look is checked against your cube level when it is loaded, so an edited save cannot wear something that is still locked.
 
 ## Tests
 
@@ -116,7 +124,6 @@ GitHub Actions runs `npm test` on every push and pull request, and each push to 
 
 ## What is next
 
-- Sound: synth effects and music that speeds up with the game.
 - Touch tuning and a play-through on phones.
 - A home screen and settings.
 
