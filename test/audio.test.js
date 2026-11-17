@@ -92,3 +92,8 @@ test('a tempo change takes effect on the next step', () => {
   assert.ok(near(times[2] - times[1], 0.1, 1e-9));
   assert.ok(near(times[3] - times[2], 0.2, 1e-9));
 });
+
+test('there is a song for every run level', () => {
+  assert.equal(A.SONGS.length, L.LAST_LEVEL + 1);
+  assert.equal(new Set(A.SONGS.map(s => s.name)).size, A.SONGS.length);
+});

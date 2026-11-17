@@ -30,6 +30,17 @@
   }
 
   const MINOR = [0, 2, 3, 5, 7, 8, 10];
+  const DORIAN = [0, 2, 3, 5, 7, 9, 10];
+  const HARMONIC = [0, 2, 3, 5, 7, 8, 11];
+  const PHRYGIAN = [0, 1, 3, 5, 7, 8, 10];
+
+  // drum rows and bass lines shared by the songs
+  const FOUR = 'x...x...x...x...', BACK = '....x.......x...', FILL = '....x.......xxxx', NONE = '................';
+  const OFFHAT = '..x...x...x...x.', HAT8 = 'x.x.x.x.x.x.x.x.', HAT16 = 'xxx.xxx.xxx.xxx.';
+  const pump = d => `${d} - ${d + 7} - `.repeat(4);
+  const drive = d => `${d} - ${d} ${d} - ${d} ${d} - `.repeat(2);
+  const skip = d => `${d} - ${d + 7} ${d} - ${d} ${d + 7} - `.repeat(2);
+  const roll = d => `${d} - - - - - ${d} - - - ${d + 7} - ${d} - - -`;
 
   // Songs, one per run level. Bass plays two octaves under the root, the lead one octave over it.
   const SONGS = [
@@ -51,6 +62,97 @@
           '6 - 13 - 6 - 13 - 6 - 13 - 6 - 13 -', '6 - - 6 - - 7 - 8 - - 6 - - 4 -'),
         E: bar('x...x...x...x.x.', '....x.......x.xx', '..x.x.x.x.x.x.x.',
           '6 - 13 - 6 - 13 - 6 6 13 13 6 6 13 13', '6 - - 6 - - 7 - 8 - 9 - 8 - 7 -'),
+      },
+    },
+    {
+      name: 'Roller',
+      root: 52,
+      scale: DORIAN,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar(FOUR, NONE, OFFHAT, pump(0)),
+        A: bar(FOUR, BACK, OFFHAT, pump(0), '7 - 4 - 2 - 4 - 7 - 4 - 9 - 8 -'),
+        B: bar(FOUR, BACK, OFFHAT, pump(2), '9 - 7 - 4 - 7 - 9 - 7 - 11 - 9 -'),
+        C: bar(FOUR, BACK, OFFHAT, pump(6), '8 - 6 - 3 - 6 - 8 - 6 - 10 - 8 -'),
+        D: bar(FOUR, BACK, OFFHAT, pump(3), '7 - 5 - 3 - 5 - 7 - 8 - 7 - 5 -'),
+        E: bar(FOUR, FILL, HAT8, pump(3), '7 - 5 - 3 - 5 7 8 9 10 11 - 10 9 -'),
+      },
+    },
+    {
+      name: 'Tumbler',
+      root: 55,
+      scale: MINOR,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar(FOUR, NONE, HAT8, drive(0)),
+        A: bar(FOUR, BACK, HAT8, drive(0), '4 - - 2 - - 4 - - 7 - - 6 - 4 -'),
+        B: bar(FOUR, BACK, HAT8, drive(3), '5 - - 3 - - 5 - - 7 - - 8 - 7 -'),
+        C: bar(FOUR, BACK, HAT8, drive(5), '7 - - 5 - - 2 - - 5 - - 7 - 9 -'),
+        D: bar(FOUR, BACK, HAT8, drive(4), '8 - - 6 - - 4 - - 6 - - 4 - 1 -'),
+        E: bar(FOUR, FILL, HAT16, drive(4), '8 - - 6 - - 8 - 9 - 10 - 11 - 13 -'),
+      },
+    },
+    {
+      name: 'Acrobat',
+      root: 59,
+      scale: HARMONIC,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar(FOUR, NONE, HAT8, skip(0)),
+        A: bar(FOUR, BACK, HAT8, skip(0), '0 2 4 7 4 2 0 2 4 7 9 7 4 2 4 7'),
+        B: bar(FOUR, BACK, HAT8, skip(5), '5 7 9 12 9 7 5 7 9 12 14 12 9 7 9 12'),
+        C: bar(FOUR, BACK, HAT8, skip(3), '3 5 7 10 7 5 3 5 7 10 12 10 7 5 7 10'),
+        D: bar(FOUR, BACK, HAT8, skip(4), '4 6 8 11 8 6 4 6 8 11 13 11 8 6 4 6'),
+        E: bar(FOUR, FILL, HAT16, skip(4), '4 6 8 11 13 11 8 6 4 - 6 - 8 - 11 -'),
+      },
+    },
+    {
+      name: 'Glider',
+      root: 53,
+      scale: PHRYGIAN,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar(FOUR, NONE, HAT16, drive(0)),
+        A: bar(FOUR, BACK, HAT16, drive(0), '7 - - - 8 - - - 7 - 4 - 3 - - -'),
+        B: bar(FOUR, BACK, HAT16, drive(1), '8 - - - 10 - - - 8 - 7 - 8 - - -'),
+        C: bar(FOUR, BACK, HAT16, drive(0), '7 - - - 4 - - - 3 - 4 - 7 - - -'),
+        D: bar(FOUR, BACK, HAT16, drive(6), '6 - - - 5 - - - 6 - 8 - 10 - - -'),
+        E: bar(FOUR, FILL, HAT16, drive(6), '6 - - - 5 - 6 - 8 - 10 - 11 - 14 -'),
+      },
+    },
+    {
+      name: 'Comet',
+      root: 58,
+      scale: MINOR,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar('x.........x.....', NONE, HAT8, roll(0)),
+        A: bar('x.........x.....', BACK, HAT8, roll(0), '7 - 9 - 7 - 4 - 7 - 9 - 11 - 9 -'),
+        B: bar('x.........x.....', BACK, HAT8, roll(6), '8 - 6 - 3 - 6 - 8 - 9 - 8 - 6 -'),
+        C: bar('x.........x.....', BACK, HAT8, roll(5), '7 - 5 - 2 - 5 - 7 - 9 - 10 - 9 -'),
+        D: bar('x.........x.....', BACK, HAT8, roll(6), '8 - 9 - 11 - 9 - 8 - 6 - 8 - - -'),
+        E: bar('x.........x.x...', FILL, HAT16, roll(6), '8 - 9 - 11 - 13 - 14 - 13 - 11 - 9 -'),
+      },
+    },
+    {
+      // written half-time: the snare lands once a bar, so 195 BPM feels big rather than frantic
+      name: 'Legend',
+      root: 54,
+      scale: MINOR,
+      intro: ['I'],
+      loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
+      patterns: {
+        I: bar('x.........x.....', NONE, HAT8, roll(0)),
+        A: bar('x.........x.....', '........x.......', HAT8, roll(0), '7 - - - - - 9 - 11 - - - 9 - 7 -'),
+        B: bar('x.........x.....', '........x.......', HAT8, roll(5), '12 - - - - - 11 - 9 - - - 7 - 9 -'),
+        C: bar('x.........x.....', '........x.......', HAT8, roll(2), '9 - - - - - 11 - 12 - - - 14 - 12 -'),
+        D: bar('x.........x.....', '........x.......', HAT8, roll(6), '13 - - - - - 11 - 10 - - - 8 - 6 -'),
+        E: bar('x.........x.x...', '........x...x.xx', HAT16, roll(6), '13 - - - 11 - 13 - 14 - - - - - - -'),
       },
     },
   ];
