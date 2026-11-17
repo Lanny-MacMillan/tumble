@@ -140,19 +140,18 @@
       },
     },
     {
-      // written half-time: the snare lands once a bar, so 195 BPM feels big rather than frantic
       name: 'Legend',
       root: 54,
       scale: MINOR,
       intro: ['I'],
       loop: ['A', 'B', 'C', 'D', 'A', 'B', 'C', 'E'],
       patterns: {
-        I: bar('x.........x.....', NONE, HAT8, roll(0)),
-        A: bar('x.........x.....', '........x.......', HAT8, roll(0), '7 - - - - - 9 - 11 - - - 9 - 7 -'),
-        B: bar('x.........x.....', '........x.......', HAT8, roll(5), '12 - - - - - 11 - 9 - - - 7 - 9 -'),
-        C: bar('x.........x.....', '........x.......', HAT8, roll(2), '9 - - - - - 11 - 12 - - - 14 - 12 -'),
-        D: bar('x.........x.....', '........x.......', HAT8, roll(6), '13 - - - - - 11 - 10 - - - 8 - 6 -'),
-        E: bar('x.........x.x...', '........x...x.xx', HAT16, roll(6), '13 - - - 11 - 13 - 14 - - - - - - -'),
+        I: bar(FOUR, NONE, HAT16, skip(0)),
+        A: bar(FOUR, BACK, HAT16, skip(0), '7 9 11 14 11 9 7 9 11 14 16 14 11 9 7 4'),
+        B: bar(FOUR, BACK, HAT16, skip(5), '5 7 9 12 9 7 5 7 9 12 14 12 9 7 9 12'),
+        C: bar(FOUR, BACK, HAT16, skip(2), '9 11 13 16 13 11 9 11 13 16 17 16 13 11 9 6'),
+        D: bar(FOUR, BACK, HAT16, skip(6), '6 8 10 13 10 8 6 8 10 13 15 13 10 8 10 13'),
+        E: bar(FOUR, FILL, HAT16, skip(6), '13 14 15 16 17 16 15 14 13 11 10 8 6 8 10 13'),
       },
     },
   ];
@@ -239,6 +238,23 @@
     return { s, f };
   }
   const glide = (p, to, at) => p.exponentialRampToValueAtTime(to, at);
+  // a feedback echo: play into the node it returns; each repeat comes back `feedback` times as loud
+  function echo(ctx, out, t, time, feedback, wet) {
+    const input = ctx.createGain();
+    const delay = ctx.createDelay(1);
+    delay.delayTime.setValueAtTime(time, t);
+    const fb = ctx.createGain();
+    fb.gain.setValueAtTime(feedback, t);
+    const w = ctx.createGain();
+    w.gain.setValueAtTime(wet, t);
+    input.connect(out);
+    input.connect(delay);
+    delay.connect(fb);
+    fb.connect(delay);
+    delay.connect(w);
+    w.connect(out);
+    return input;
+  }
 
   // Effects, by game event. The jump is heard all the time, so it sets the ceiling: only the level up and the
   // crash are louder, and anything that falls or crumbles stays well under it.
@@ -256,14 +272,19 @@
       glide(o.frequency, 600, t + 0.32);
     },
     boost(ctx, out, t) { glide(hiss(ctx, out, t, 'bandpass', 400, 0.4, 0.42, 0.05).f.frequency, 4200, t + 0.38); },
+    // portals blip and then echo away, with a thin shimmer over the top
     warp(ctx, out, t) {
-      tone(ctx, out, t, 'sine', 660, 0.4, 0.06);
-      tone(ctx, out, t + 0.06, 'sine', 990, 0.4, 0.06);
-      tone(ctx, out, t + 0.12, 'sine', 740, 0.35, 0.09);
+      const e = echo(ctx, out, t, 0.11, 0.45, 0.5);
+      tone(ctx, e, t, 'sine', 660, 0.4, 0.06);
+      tone(ctx, e, t + 0.06, 'sine', 990, 0.4, 0.06);
+      tone(ctx, e, t + 0.12, 'sine', 740, 0.35, 0.09);
+      tone(ctx, e, t, 'triangle', 1980, 0.12, 0.3, 0.02);
     },
     flip(ctx, out, t) {
-      tone(ctx, out, t, 'sine', 880, 0.4, 0.07);
-      glide(hiss(ctx, out, t, 'highpass', 5000, 0.25, 0.28, 0.03).f.frequency, 1200, t + 0.26);
+      const e = echo(ctx, out, t, 0.14, 0.45, 0.5);
+      tone(ctx, e, t, 'sine', 880, 0.4, 0.07);
+      tone(ctx, e, t + 0.07, 'sine', 587, 0.3, 0.09);
+      glide(hiss(ctx, e, t, 'highpass', 5000, 0.25, 0.28, 0.03).f.frequency, 1200, t + 0.26);
     },
     pickup(ctx, out, t) {
       tone(ctx, out, t, 'triangle', 1047, 0.35, 0.22);
@@ -274,9 +295,11 @@
       glide(tone(ctx, out, t, 'square', 1800, 0.2, 0.16).frequency, 600, t + 0.15);
     },
     crumble(ctx, out, t) { hiss(ctx, out, t, 'lowpass', 900, 0.2, 0.16); },
+    // a trap going off has to cut through the music: a bright tick, then a falling creak
     trap(ctx, out, t) {
-      glide(tone(ctx, out, t, 'triangle', 300, 0.25, 0.22).frequency, 150, t + 0.2);
-      hiss(ctx, out, t, 'lowpass', 600, 0.15, 0.2);
+      tone(ctx, out, t, 'sine', 1400, 0.3, 0.05);
+      glide(tone(ctx, out, t, 'square', 900, 0.45, 0.25, 0.005, 2500).frequency, 350, t + 0.22);
+      hiss(ctx, out, t, 'bandpass', 1000, 0.25, 0.25);
     },
     best(ctx, out, t) {
       tone(ctx, out, t, 'square', 784, 0.4, 0.1, 0.005, 3000);

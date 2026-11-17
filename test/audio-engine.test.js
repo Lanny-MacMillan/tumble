@@ -25,6 +25,8 @@ function fakeContext() {
   ctx.createBufferSource = () => source('buffer');
   ctx.createGain = () => { const g = node({ gain: param(1) }); ctx.gains.push(g); return g; };
   ctx.createBiquadFilter = () => node({ type: 'lowpass', frequency: param(350), Q: param(1), gain: param(0) });
+  ctx.delays = [];
+  ctx.createDelay = () => { const d = node({ delayTime: param(0) }); ctx.delays.push(d); return d; };
   ctx.createDynamicsCompressor = () => node({ threshold: param(-24), knee: param(30), ratio: param(12), attack: param(0.003), release: param(0.25) });
   ctx.createBuffer = (ch, len) => ({ length: len, getChannelData: () => new Float32Array(len) });
   ctx.destination = node({});
@@ -228,4 +230,22 @@ test('a restart during the tape stop silences the old notes at once', () => {
   ctx.currentTime += 0.25;
   e.startSong(0);
   for (const s of old) assert.ok(s.stopAt <= ctx.currentTime + 1e-9, `${s.kind} still sounding at ${s.stopAt}`);
+});
+
+test('traps are clearly heard: close to a jump in level and pitched where the music does not cover them', () => {
+  const jump = peakOf('jump');
+  assert.ok(peakOf('trap') >= 0.8 * jump, `trap ${peakOf('trap')} vs jump ${jump}`);
+  const ctx = fakeContext();
+  A.SFX.trap(ctx, ctx.createGain(), 1);
+  const top = Math.max(...ctx.starts.filter(s => s.kind === 'osc').flatMap(s => s.frequency.set.slice(1)));
+  assert.ok(top >= 600, `highest tone ${top} Hz`);
+});
+
+test('portals echo', () => {
+  for (const k of ['warp', 'flip']) {
+    const ctx = fakeContext();
+    A.SFX[k](ctx, ctx.createGain(), 1);
+    assert.ok(ctx.delays.length > 0, `${k} has an echo`);
+    assert.ok(ctx.delays.every(d => d.delayTime.set.slice(1).some(v => v >= 0.08)), `${k} echo is long enough to hear`);
+  }
 });

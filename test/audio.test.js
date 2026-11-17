@@ -97,3 +97,17 @@ test('there is a song for every run level', () => {
   assert.equal(A.SONGS.length, L.LAST_LEVEL + 1);
   assert.equal(new Set(A.SONGS.map(s => s.name)).size, A.SONGS.length);
 });
+
+// lead notes plus hats across the song's loop, per bar
+function busyness(song) {
+  let n = 0;
+  for (const id of song.loop) {
+    const p = song.patterns[id];
+    n += p.lead.filter(x => x !== null).length + [...p.hat].filter(c => c === 'x').length;
+  }
+  return n / song.loop.length;
+}
+
+test("level 7's song is at least as busy as level 4's", () => {
+  assert.ok(busyness(A.SONGS[6]) >= busyness(A.SONGS[3]), `${busyness(A.SONGS[6])} vs ${busyness(A.SONGS[3])}`);
+});
