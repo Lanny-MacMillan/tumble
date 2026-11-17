@@ -1,9 +1,12 @@
 name: CI
 
+# changes to docs, screenshots or the license touch neither the game nor its tests, so they skip the run
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'screenshots/**', 'LICENSE', '.gitignore']
   pull_request:
+    paths-ignore: ['**.md', 'screenshots/**', 'LICENSE', '.gitignore']
   workflow_dispatch:
 
 permissions:
