@@ -197,3 +197,35 @@ test('the engine plays effects only after unlock', () => {
   e.play('jump');
   assert.ok(ctx.starts.length > 0);
 });
+
+test('dying in slow time or a boost does not carry into the next song', () => {
+  const ctx = fakeContext();
+  const { e } = engineWith(ctx);
+  e.unlock();
+  e.startSong(0);
+  run(ctx, e, 0.5);
+  e.setFeel({ timeScale: 0.5, boosted: true });
+  run(ctx, e, 0.5);
+  e.stopSong();
+  run(ctx, e, 0.3);
+  const n = ctx.starts.length;
+  e.startSong(0);
+  const kicks = ctx.starts.slice(n).filter(s => s.kind === 'osc' && s.frequency.set[1] === 150);
+  assert.ok(kicks.length > 0, 'the first kick is at full pitch');
+  const f = e._nodes().filter.frequency.set;
+  assert.equal(f[f.length - 1], 2500, 'the music filter is closed again');
+});
+
+test('a restart during the tape stop silences the old notes at once', () => {
+  const ctx = fakeContext();
+  const { e } = engineWith(ctx);
+  e.unlock();
+  e.startSong(0);
+  run(ctx, e, 0.03);   // the first kick and bass note have just started and ring for about 0.3 s
+  const old = ctx.starts.filter(s => s.startAt <= ctx.currentTime);
+  assert.ok(old.some(s => s.stopAt > ctx.currentTime + 0.25), 'a note is still ringing at the restart');
+  e.stopSong();
+  ctx.currentTime += 0.25;
+  e.startSong(0);
+  for (const s of old) assert.ok(s.stopAt <= ctx.currentTime + 1e-9, `${s.kind} still sounding at ${s.stopAt}`);
+});

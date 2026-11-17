@@ -317,6 +317,7 @@
     let timer = null;
     let feel = { timeScale: 1, boosted: false };
     let live = [];       // music sources scheduled or sounding, for the tape stop
+    let dying = [];      // sources still bending down in a tape stop, cut short if a new song starts
 
     const clampLevel = k => Math.max(0, Math.min(L.LAST_LEVEL, Math.floor(k) || 0));
     const songData = k => SONGS[Math.min(k, SONGS.length - 1)];
@@ -369,9 +370,11 @@
       if (timer !== null) clearTimer(timer);
       timer = null;
     }
+    // some older WebKit throws on a second stop(); the note is ending either way
+    function halt(src, t) { try { src.stop(t); } catch (e) { /* already stopping */ } }
     // drop notes that were scheduled ahead and have not started
     function cancelAhead(now) {
-      for (const v of live) if (v.start > now) v.src.stop(now);
+      for (const v of live) if (v.start > now) halt(v.src, now);
       live = live.filter(v => v.start <= now && v.end > now);
     }
 
@@ -399,6 +402,12 @@
       const now = ctx.currentTime;
       stopTimer();
       cancelAhead(now);
+      for (const v of dying) if (v.end > now) halt(v.src, now);
+      dying = [];
+      // a run that died in slow time or on a boost must not leave the next song slowed or bright
+      feel = { timeScale: 1, boosted: false };
+      nodes.filter.frequency.cancelScheduledValues(now);
+      nodes.filter.frequency.setValueAtTime(DULL_HZ, now);
       const g = nodes.music.gain;
       g.cancelScheduledValues(now);
       g.setValueAtTime(MUSIC, now);
@@ -452,6 +461,7 @@
           if (v.hz > 0) glide(v.src.frequency, Math.max(20, v.hz * 0.25), now + TAPE_STOP_S);
           else v.src.playbackRate.linearRampToValueAtTime(0.25, now + TAPE_STOP_S);
         }
+        dying = live;
         live = [];
         const g = nodes.music.gain;
         g.cancelScheduledValues(now);

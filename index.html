@@ -256,7 +256,8 @@
     }
     press();
   });
-  window.addEventListener('pointerup', release);
+  // on phones a touch only counts as a gesture that may start audio when the finger lifts
+  window.addEventListener('pointerup', () => { sound.unlock(); release(); });
   window.addEventListener('pointercancel', release);
 
   // pause when the tab is hidden and drop any stored time on resume
