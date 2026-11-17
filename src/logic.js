@@ -886,6 +886,7 @@
 
   function stepCube(c, world, input, dt, speed) {
     const ev = { jumped: false, landed: false, dead: null };
+    const cxPrev = c.x + CUBE / 2;
 
     // slow time scales everything the cube integrates, including its progress along x
     dt *= timeScale(world, c);
@@ -990,7 +991,7 @@
       c.vy = 0;
       c.onGround = true;
       c.stand = landMover;
-      if (landCrumble !== null && c.cr[landCrumble] === undefined) c.cr[landCrumble] = c.t;
+      if (landCrumble !== null && c.cr[landCrumble] === undefined) { c.cr[landCrumble] = c.t; ev.crumble = true; }
     } else {
       c.stand = null;
     }
@@ -1067,7 +1068,7 @@
 
     // touching a boost pad on the ground starts a boost; it ends by itself a fixed distance later
     if (c.onGround && !ev.dead && (c.boostX0 === null || c.boostX0 === undefined)) {
-      for (const p of world.pads) if (x1 > p.x0 && x0 < p.x1) { c.boostX0 = p.x0; break; }
+      for (const p of world.pads) if (x1 > p.x0 && x0 < p.x1) { c.boostX0 = p.x0; ev.boost = true; break; }
     }
     if (c.boostX0 !== null && c.boostX0 !== undefined && c.x - c.boostX0 >= BOOST_RUN_TILES * TILE) c.boostX0 = null;
 
@@ -1103,6 +1104,10 @@
     }
 
     if (c.onGround && wasAir) ev.landed = true;
+    // a rage-bait trap goes off as the cube's centre crosses its trigger; reported for sound, nothing else reads it
+    const cx = c.x + CUBE / 2;
+    const crossed = q => cxPrev < q.trigger && cx >= q.trigger;
+    if (world.vanish.some(crossed) || world.pops.some(crossed) || world.slams.some(crossed) || world.gates.some(q => q.kind === 'drop' && crossed(q))) ev.trap = true;
     return ev;
   }
 
@@ -1330,6 +1335,9 @@
       if (ev.bounce) events.push('bounce');
       if (ev.shield) events.push('shield');
       if (ev.pickup) events.push('pickup');
+      if (ev.boost) events.push('boost');
+      if (ev.crumble) events.push('crumble');
+      if (ev.trap) events.push('trap');
       if (flipAt(g.world, g.cube.x + CUBE / 2) !== flipBefore) events.push('flip');
       const lvl = gameLevel(g);
       if (lvl > g.level) {
