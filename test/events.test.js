@@ -39,8 +39,9 @@ test('trap fires once per trap as its trigger is crossed', () => {
   ];
   for (const [name, triggerOf] of cases) {
     const { world, steps } = runFlat(chunk(name));
-    assert.equal(count(steps, 'trap'), 1, name);
-    const at = steps.find(s => s.ev.trap);
+    const fired = steps.filter(s => L.trapCrossed(world, s.cxPrev, s.cx));
+    assert.equal(fired.length, 1, name);
+    const at = fired[0];
     const trigger = triggerOf(world);
     assert.ok(at.cxPrev < trigger && at.cx >= trigger, `${name} fires on the step that crosses the trigger`);
   }
@@ -50,13 +51,13 @@ test('plain chunks report none of the new events', () => {
   for (const name of ['flat@0', 'spike1@0', 'gap2@0']) {
     const c = chunk(name);
     if (!c) continue;
-    const { steps } = runFlat(c);
-    assert.equal(count(steps, 'boost') + count(steps, 'crumble') + count(steps, 'trap'), 0, name);
+    const { world, steps } = runFlat(c);
+    assert.equal(count(steps, 'boost') + count(steps, 'crumble') + steps.filter(s => L.trapCrossed(world, s.cxPrev, s.cx)).length, 0, name);
   }
 });
 
 test('stepGame passes the new events on by name', () => {
-  for (const [name, e] of [['boostRun@0', 'boost'], ['crumbleBridge@0', 'crumble'], ['slamRoof@0', 'trap']]) {
+  for (const [name, e] of [['boostRun@0', 'boost'], ['crumbleBridge@0', 'crumble'], ['slamRoof@0', 'trap'], ['vanish0@0', 'trap']]) {
     const g = L.newGame(5, true, 0, [chunk(name)]);
     const seen = new Set();
     for (let i = 0; i < 6000 && g.state === 'running'; i++) {

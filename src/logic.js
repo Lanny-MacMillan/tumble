@@ -886,7 +886,6 @@
 
   function stepCube(c, world, input, dt, speed) {
     const ev = { jumped: false, landed: false, dead: null };
-    const cxPrev = c.x + CUBE / 2;
 
     // slow time scales everything the cube integrates, including its progress along x
     dt *= timeScale(world, c);
@@ -1104,11 +1103,14 @@
     }
 
     if (c.onGround && wasAir) ev.landed = true;
-    // a rage-bait trap goes off as the cube's centre crosses its trigger; reported for sound, nothing else reads it
-    const cx = c.x + CUBE / 2;
-    const crossed = q => cxPrev < q.trigger && cx >= q.trigger;
-    if (world.vanish.some(crossed) || world.pops.some(crossed) || world.slams.some(crossed) || world.gates.some(q => q.kind === 'drop' && crossed(q))) ev.trap = true;
     return ev;
+  }
+
+  // Did a rage-bait trap go off as the cube's centre moved from cxPrev to cx? Kept out of stepCube, which must never
+  // read the drawing-only traps; stepGame reports it for sound and nothing else uses it.
+  function trapCrossed(world, cxPrev, cx) {
+    const crossed = q => cxPrev < q.trigger && cx >= q.trigger;
+    return world.vanish.some(crossed) || world.pops.some(crossed) || world.slams.some(crossed) || world.gates.some(q => q.kind === 'drop' && crossed(q));
   }
 
   // ---- saved record -------------------------------------------------------
@@ -1325,6 +1327,7 @@
     }
     if (g.state === 'running') {
       const dist = distancePx(g);
+      const cxPrev = g.cube.x + CUBE / 2;
       const ev = stepCube(g.cube, g.world, input, dt, gameSpeed(g) * boostMul(g.cube));
       extendWorld(g.world, g.cube.x, dist);
       pruneWorld(g.world, g.cube.x - TILE * 20);
@@ -1337,7 +1340,7 @@
       if (ev.pickup) events.push('pickup');
       if (ev.boost) events.push('boost');
       if (ev.crumble) events.push('crumble');
-      if (ev.trap) events.push('trap');
+      if (trapCrossed(g.world, cxPrev, g.cube.x + CUBE / 2)) events.push('trap');
       if (flipAt(g.world, g.cube.x + CUBE / 2) !== flipBefore) events.push('flip');
       const lvl = gameLevel(g);
       if (lvl > g.level) {
@@ -1368,7 +1371,7 @@
     JUMP_PEAK, AIR_TIME_FULL, MAX_STEP_TILES, MAX_GAP_TILES, FAIRNESS, MAX_HAZARDS_PER_JUMP, JUMP_RANGE_MAX_TILES, CHUNKS,
     speedAt, levelAt, levelSpeed, heatAt, gameSpeed, gameLevel, showcaseSpeedAt, SHOWCASES, SHOWCASE_REPEATS, showcaseSequence, newShowcase, mulberry32, makeChunk, cloneCube, moverTop, crumbleGone, moverSampleStep, moverSpeed, createEmptyWorld, addSolid, addGround, placeChunk,
     createWorld, extendWorld, newCube, stepCube, newGame, stepGame, distancePx, meters,
-    zoneAt, canRestart, createStore, bestMarkerX, SAVE_KEY, SAVE_VERSION,
+    zoneAt, canRestart, trapCrossed, createStore, bestMarkerX, SAVE_KEY, SAVE_VERSION,
     VIEW_H, MIN_VIEW_W, CUBE_SCREEN_X, CUE_WARN_S, CUE_WARN_AT_MAX_S, VIEW_AHEAD_PX,
     SLOW_SCALE, FLOAT_GRAVITY, FIELD_RAMP_TILES, FLOAT_RANGE_MUL, floatAirTime, fieldWeight, timeScale, gravMul,
     tierCap, TIER_STEP_M, PLAIN_START_M, cueGems, cueStartTile, CUE_LEAD_S, practiceStart, boxClear, boostMul, hopHeights, hopCrossing, BOOST_MUL, BOOST_RUN_TILES, BOOST_RAMP_TILES, BOOST_CAP, ORB_R_TILES, ORB_HOLD, ORB_RING_H, ORB_LEAD, ORB_V, ORB_APEX_TILES, SIM_DT, CRUMBLE_DELAY, CRUMBLE_SHAKE, CRUMBLE_MAX_TILES, MOVER_PHASES, MOVER_SAMPLE_MAX_TILES, MOVER_MAX_SPEED,
