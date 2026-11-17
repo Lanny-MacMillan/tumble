@@ -12,6 +12,7 @@
 <body>
 <canvas id="c"></canvas>
 <script src="src/logic.js"></script>
+<script src="src/audio.js"></script>
 <script>
 (() => {
   const L = window.TumbleLogic;
@@ -90,6 +91,9 @@
   const benchRounds = [{ name: 'as is', glow: true, lowRes: false }, { name: 'glow off', glow: false, lowRes: false }, { name: 'half res', glow: true, lowRes: true }]
     .map(r => Object.assign(r, { n: 0, gap: 0, gapMax: 0, over17: 0, over25: 0, workMax: 0 }));
   let benchRound = -1, benchT = 0, benchBurst = 0;
+  // music and effects; nothing is heard until the first tap or key, and the bench runs silent
+  const sound = TumbleAudio.createEngine(bench ? { makeContext: () => null } : undefined);
+  sound.setMuted(store.getMuted());
   const practiceLevel = (() => {
     try {
       // counted from 1, as the HUD shows it: ?level=1 is the first level, ?level=7 the last
@@ -218,13 +222,15 @@
     } catch (e) {}
   }
 
-  function press() { held = true; pressQueued = true; lockLandscape(); }
+  function press() { sound.unlock(); held = true; pressQueued = true; lockLandscape(); }
   function release() { held = false; }
 
   window.addEventListener('keydown', e => {
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault();
       if (!e.repeat) press();
+    } else if (e.code === 'KeyM') {
+      sound.setMuted(store.setMuted(!store.getMuted()));
     } else if (e.code === 'KeyD') {
       debug = !debug;
     } else if (e.code === 'KeyL' && debug) {
@@ -256,11 +262,13 @@
   // pause when the tab is hidden and drop any stored time on resume
   document.addEventListener('visibilitychange', () => {
     paused = document.hidden;
-    if (!paused) { last = performance.now(); acc = 0; }
+    if (paused) sound.suspend();
+    else { sound.resume(); last = performance.now(); acc = 0; }
   });
 
   function restart() {
     game = startGame(true);
+    sound.startSong(L.gameLevel(game));
     trail = [];
     lastRun = null;
     bestFlash = 0;
@@ -309,6 +317,15 @@
     pressQueued = false;
 
     const events = bench ? benchStep(dt) : L.stepGame(game, input, dt);
+    // an orb or a bounce pad throws the cube with its own sound, so its jump stays quiet
+    const thrown = events.includes('orb') || events.includes('bounce');
+    for (const e of events) {
+      if (e === 'start') sound.startSong(L.gameLevel(game));
+      else if (e === 'level') sound.queueSong(L.gameLevel(game));
+      else if (e === 'die') { sound.stopSong(); sound.play('die'); }
+      else if (!(e === 'jump' && thrown)) sound.play(e);
+    }
+    if (game.state === 'running') sound.setFeel({ timeScale: L.timeScale(game.world, game.cube), boosted: L.boostMul(game.cube) > 1 });
     for (const e of events) {
       if (e === 'jump') { squash = -0.25; squashV = 0; }
       if (e === 'land') { squash = 0.3; squashV = 0; if (!calm) landDust(); }
